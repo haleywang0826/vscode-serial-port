@@ -15,14 +15,23 @@ export interface SerialTerminal {
  * Creates an interactive terminal for one open port: renders incoming data live (formatted per
  * the connection's hex/ascii toggle) and sends whatever the user types on Enter. While "hex send"
  * is on, keystrokes that aren't hex digits/spaces are rejected as they're typed.
+ *
+ * Incoming data is never written straight to the cursor position, since that would land in the
+ * middle of whatever the user is currently typing. Instead every write clears the in-progress
+ * input line, prints the new output above it, then redraws the prompt + typed-so-far text — so
+ * the input line always stays pinned as the last line of the terminal.
  */
 export function createSerialTerminal(connection: PortConnection): SerialTerminal {
   const writeEmitter = new vscode.EventEmitter<string>();
   const closeEmitter = new vscode.EventEmitter<void>();
   let line = '';
 
+  const printAboveInput = (text: string): void => {
+    writeEmitter.fire('\r\x1b[2K' + text + promptFor(connection) + line);
+  };
+
   const dataSub = connection.onDidReceiveData((bytes) => {
-    writeEmitter.fire(formatBytes(bytes, connection.hexRecv) + '\r\n');
+    printAboveInput(formatBytes(bytes, connection.hexRecv) + '\r\n');
   });
 
   const connectionCloseSub = connection.onDidClose(() => closeEmitter.fire());
@@ -40,7 +49,7 @@ export function createSerialTerminal(connection: PortConnection): SerialTerminal
     handleInput: (data: string) => {
       for (const ch of data) {
         if (ch === ENTER) {
-          void sendLine(connection, line, writeEmitter);
+          void sendLine(connection, line, printAboveInput);
           line = '';
           writeEmitter.fire('\r\n' + promptFor(connection));
           continue;
@@ -90,7 +99,7 @@ function promptFor(connection: PortConnection): string {
 async function sendLine(
   connection: PortConnection,
   line: string,
-  writeEmitter: vscode.EventEmitter<string>,
+  printAboveInput: (text: string) => void,
 ): Promise<void> {
   if (line.trim().length === 0) {
     return;
@@ -100,6 +109,6 @@ async function sendLine(
     await connection.write(bytes);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    writeEmitter.fire(`\r\n\x1b[31m${message}\x1b[0m`);
+    printAboveInput(`\x1b[31m${message}\x1b[0m\r\n`);
   }
 }

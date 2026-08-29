@@ -24,6 +24,8 @@
     editingTemplateId: null,
     editTemplateDraft: { name: '', format: 'hex', data: '' },
     customBaud: {},
+    defaultSettingsCollapsed: false,
+    collapsedSessions: new Set(),
   };
 
   function postMessage(message) {
@@ -122,19 +124,25 @@
 
   function renderSession(session) {
     const prefix = `session:${session.path}`;
-    return `
-      <div class="session-card">
-        <div class="session-header">
-          <strong>${escapeHtml(session.path)}</strong>
-          <button data-action="close-port" data-path="${escapeHtml(session.path)}">Close</button>
-        </div>
+    const collapsed = ui.collapsedSessions.has(session.path);
+    const chevron = collapsed ? '▸' : '▾';
+    const body = collapsed
+      ? ''
+      : `
         ${renderConfigControls(prefix, session.config, true)}
         <div class="row checkboxes">
           <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
           <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Recv</label>
           <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''}> Record to Output Channel</label>
         </div>
-        <div class="stats muted">TX: ${session.stats.bytesSent} bytes &nbsp; RX: ${session.stats.bytesReceived} bytes</div>
+        <div class="stats muted">TX: ${session.stats.bytesSent} bytes &nbsp; RX: ${session.stats.bytesReceived} bytes</div>`;
+    return `
+      <div class="session-card">
+        <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
+          <strong>${chevron} ${escapeHtml(session.path)}</strong>
+          <button data-action="close-port" data-path="${escapeHtml(session.path)}">Close</button>
+        </div>
+        ${body}
       </div>`;
   }
 
@@ -222,8 +230,10 @@
     root.innerHTML = `
       ${renderPortPicker()}
       <section class="panel-section">
-        <h3>Default Settings</h3>
-        ${renderConfigControls('default', lastState.defaultConfig, false)}
+        <div class="section-header collapsible-header" data-action="toggle-default-settings">
+          <h3>${ui.defaultSettingsCollapsed ? '▸' : '▾'} Default Settings</h3>
+        </div>
+        ${ui.defaultSettingsCollapsed ? '' : renderConfigControls('default', lastState.defaultConfig, false)}
       </section>
       ${renderSessions()}
       ${renderTemplates()}
@@ -323,6 +333,20 @@
       case 'refresh-ports':
         postMessage({ type: 'refreshPorts' });
         break;
+      case 'toggle-default-settings':
+        ui.defaultSettingsCollapsed = !ui.defaultSettingsCollapsed;
+        render();
+        break;
+      case 'toggle-session': {
+        const path = el.dataset.path;
+        if (ui.collapsedSessions.has(path)) {
+          ui.collapsedSessions.delete(path);
+        } else {
+          ui.collapsedSessions.add(path);
+        }
+        render();
+        break;
+      }
       case 'open-port':
         postMessage({ type: 'openPort' });
         break;
