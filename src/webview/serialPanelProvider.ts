@@ -277,11 +277,14 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       connection.setHexSend(meta?.hexSend ?? this.defaultHexSend);
       connection.setHexRecv(meta?.hexRecv ?? this.defaultHexRecv);
       connection.setShowTimestamp(meta?.showTimestamp ?? false);
-      if (meta && (meta.rts !== connection.rts || meta.dtr !== connection.dtr)) {
-        await Promise.all([connection.setRTS(meta.rts), connection.setDTR(meta.dtr)]).catch((err) => {
-          vscode.window.showErrorMessage(`Failed to restore RTS/DTR for ${path}: ${errorMessage(err)}`);
-        });
-      }
+      // Always explicitly assert RTS/DTR (rather than only when they differ from the connection's
+      // own field defaults) — the OS/driver may leave a freshly-opened port's lines in whatever
+      // state it defaults to, which isn't necessarily the deasserted baseline these default to.
+      await Promise.all([connection.setRTS(meta?.rts ?? false), connection.setDTR(meta?.dtr ?? false)]).catch(
+        (err) => {
+          vscode.window.showErrorMessage(`Failed to set RTS/DTR for ${path}: ${errorMessage(err)}`);
+        },
+      );
       connection.onDidClose(() => {
         this.closedMeta.set(path, {
           config: connection.config,
@@ -466,8 +469,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           hexRecv: meta?.hexRecv ?? this.defaultHexRecv,
           recording: false,
           showTimestamp: meta?.showTimestamp ?? false,
-          rts: meta?.rts ?? true,
-          dtr: meta?.dtr ?? true,
+          rts: meta?.rts ?? false,
+          dtr: meta?.dtr ?? false,
           logFilePath: meta?.logFilePath,
           stats: meta?.stats ?? { bytesSent: 0, bytesReceived: 0 },
         };

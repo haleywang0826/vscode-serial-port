@@ -67,7 +67,17 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
 - `serial/connectionManager.ts` — `PortConnection` (one open port: I/O,
   live baud-rate update, byte counters, hex/ascii + recording toggles, and
   file-based logging while recording) and `ConnectionManager` (the
-  open-ports registry, keyed by device path).
+  open-ports registry, keyed by device path). `rts`/`dtr` both default to
+  `false` (unchecked) — RTS/DTR are electrically AC-coupled to many
+  boards' reset pins (the classic Arduino/ESP auto-reset circuit), so what
+  triggers a reboot is the *transition* between asserted/deasserted, not
+  holding a level. `SerialPanelProvider.openPath` explicitly asserts this
+  deasserted baseline (`setRTS`/`setDTR`) on every port open — including
+  reopens restoring a `closedMeta` snapshot — rather than trusting
+  whatever level the OS/driver happens to default a freshly-opened port
+  to, so the physical line state is always known and a subsequent
+  check-then-uncheck in the panel is guaranteed to be a real edge on the
+  hardware line, not just a UI no-op.
 - `serial/format.ts` — hex↔bytes conversion and the hex-mode keystroke
   filter, shared by the tree's stats display and the terminal.
   `bytesToAsciiForTerminal`/`formatBytesForTerminal` are terminal-only

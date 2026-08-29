@@ -55,8 +55,14 @@ export class PortConnection {
   hexRecv = false;
   recording = false;
   showTimestamp = false;
-  rts = true;
-  dtr = true;
+  /** Both default deasserted (unchecked). RTS/DTR are electrically AC-coupled to many boards'
+   * reset lines (the classic Arduino/ESP auto-reset circuit), so what resets the board is the
+   * *transition*, not the level — checking then unchecking one of these is what pulses reset,
+   * not merely having it checked. See `SerialPanelProvider.openPath`, which explicitly asserts
+   * this deasserted state on every open rather than trusting the OS/driver's own default, so a
+   * freshly-opened port always starts from a known, truly-deasserted baseline. */
+  rts = false;
+  dtr = false;
   readonly stats: PortStats = { bytesSent: 0, bytesReceived: 0 };
 
   private readonly port: SerialPort;
