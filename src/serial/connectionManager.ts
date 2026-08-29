@@ -55,6 +55,8 @@ export class PortConnection {
   hexRecv = false;
   recording = false;
   showTimestamp = false;
+  rts = true;
+  dtr = true;
   readonly stats: PortStats = { bytesSent: 0, bytesReceived: 0 };
 
   private readonly port: SerialPort;
@@ -170,6 +172,33 @@ export class PortConnection {
   setShowTimestamp(value: boolean): void {
     this.showTimestamp = value;
     this.onDidUpdateEmitter.fire();
+  }
+
+  /** `SerialPort#set()` applies its own defaults to any flag not passed in a given call (not the
+   * port's current state), so RTS and DTR must always be set together or one silently resets. */
+  setRTS(value: boolean): Promise<void> {
+    return this.setControlLines({ rts: value, dtr: this.dtr }).then(() => {
+      this.rts = value;
+    });
+  }
+
+  setDTR(value: boolean): Promise<void> {
+    return this.setControlLines({ rts: this.rts, dtr: value }).then(() => {
+      this.dtr = value;
+    });
+  }
+
+  private setControlLines(flags: { rts: boolean; dtr: boolean }): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.port.set(flags, (err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        this.onDidUpdateEmitter.fire();
+        resolve();
+      });
+    });
   }
 
   get isOpen(): boolean {

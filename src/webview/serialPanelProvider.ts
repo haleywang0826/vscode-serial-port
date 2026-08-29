@@ -13,7 +13,7 @@ const DEFAULT_TX_COLOR = '#00cccc';
 const DEFAULT_RX_COLOR = '#33cc33';
 
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
-type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp';
+type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp' | 'rts' | 'dtr';
 type DefaultCheckbox = 'hexSend' | 'hexRecv';
 type TerminalColorKey = 'tx' | 'rx';
 
@@ -44,6 +44,8 @@ interface StoredSessionMeta {
   hexSend: boolean;
   hexRecv: boolean;
   showTimestamp: boolean;
+  rts: boolean;
+  dtr: boolean;
   logFilePath: string | undefined;
   stats: { bytesSent: number; bytesReceived: number };
 }
@@ -56,6 +58,8 @@ interface PanelSession {
   hexRecv: boolean;
   recording: boolean;
   showTimestamp: boolean;
+  rts: boolean;
+  dtr: boolean;
   logFilePath: string | undefined;
   stats: { bytesSent: number; bytesReceived: number };
 }
@@ -221,6 +225,9 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
   private async refreshPorts(): Promise<void> {
     const list = await SerialPort.list();
     this.ports = list.map((port) => ({ path: port.path, description: port.manufacturer ?? port.pnpId ?? '' }));
+    if (!this.ports.some((port) => port.path === this.selectedPort)) {
+      this.selectedPort = this.ports[0]?.path;
+    }
     this.postState();
   }
 
@@ -270,12 +277,19 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       connection.setHexSend(meta?.hexSend ?? this.defaultHexSend);
       connection.setHexRecv(meta?.hexRecv ?? this.defaultHexRecv);
       connection.setShowTimestamp(meta?.showTimestamp ?? false);
+      if (meta && (meta.rts !== connection.rts || meta.dtr !== connection.dtr)) {
+        await Promise.all([connection.setRTS(meta.rts), connection.setDTR(meta.dtr)]).catch((err) => {
+          vscode.window.showErrorMessage(`Failed to restore RTS/DTR for ${path}: ${errorMessage(err)}`);
+        });
+      }
       connection.onDidClose(() => {
         this.closedMeta.set(path, {
           config: connection.config,
           hexSend: connection.hexSend,
           hexRecv: connection.hexRecv,
           showTimestamp: connection.showTimestamp,
+          rts: connection.rts,
+          dtr: connection.dtr,
           logFilePath: connection.logFilePath,
           stats: { ...connection.stats },
         });
@@ -341,13 +355,23 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         case 'showTimestamp':
           connection.setShowTimestamp(value);
           break;
+        case 'rts':
+          void connection.setRTS(value).catch((err) => {
+            vscode.window.showErrorMessage(`Failed to set RTS for ${path}: ${errorMessage(err)}`);
+          });
+          break;
+        case 'dtr':
+          void connection.setDTR(value).catch((err) => {
+            vscode.window.showErrorMessage(`Failed to set DTR for ${path}: ${errorMessage(err)}`);
+          });
+          break;
       }
       return;
     }
     // No live connection: remember the setting on the closed session so a later reopen
     // picks it up. Recording only makes sense while connected, so it's ignored here.
     const meta = this.closedMeta.get(path);
-    if (meta && (checkbox === 'hexSend' || checkbox === 'hexRecv' || checkbox === 'showTimestamp')) {
+    if (meta && checkbox !== 'record') {
       meta[checkbox] = value;
       this.postState();
     }
@@ -427,6 +451,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
             hexRecv: connection.hexRecv,
             recording: connection.recording,
             showTimestamp: connection.showTimestamp,
+            rts: connection.rts,
+            dtr: connection.dtr,
             logFilePath: connection.logFilePath,
             stats: connection.stats,
           };
@@ -440,6 +466,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           hexRecv: meta?.hexRecv ?? this.defaultHexRecv,
           recording: false,
           showTimestamp: meta?.showTimestamp ?? false,
+          rts: meta?.rts ?? true,
+          dtr: meta?.dtr ?? true,
           logFilePath: meta?.logFilePath,
           stats: meta?.stats ?? { bytesSent: 0, bytesReceived: 0 },
         };

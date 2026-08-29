@@ -149,7 +149,6 @@
   function renderSession(session) {
     const prefix = `session:${session.path}`;
     const collapsed = ui.collapsedSessions.has(session.path);
-    const statusBadge = session.connected ? '' : '<span class="status-closed">closed</span>';
     const body = collapsed
       ? ''
       : `
@@ -160,6 +159,8 @@
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Receive</label>
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''} ${session.connected ? '' : 'disabled title="Open the port to record"'}> Record to File</label>
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="showTimestamp" ${session.showTimestamp ? 'checked' : ''}> Show Timestamp</label>
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="rts" ${session.rts ? 'checked' : ''}> RTS</label>
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="dtr" ${session.dtr ? 'checked' : ''}> DTR</label>
           </div>
           ${
             session.logFilePath
@@ -173,14 +174,13 @@
         </div>`;
     const toggleButton = session.connected
       ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close Port">&#9632;</button>`
-      : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open Port">&#9658;</button>`;
+      : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open Port">&#9213;</button>`;
     return `
       <div class="session-card">
         <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
           <div class="session-title">
             <span class="twisty ${collapsed ? '' : 'expanded'}"></span>
             <strong class="truncate">${escapeHtml(session.path)}</strong>
-            ${statusBadge}
           </div>
           <div class="row session-actions">
             ${toggleButton}
@@ -265,7 +265,7 @@
         <div class="template-row-sub">
           <span class="muted truncate">${escapeHtml(template.data)}</span>
           <div class="row template-actions">
-            <button class="icon-button" data-action="send-template" data-id="${template.id}" ${sendDisabled} title="Send">&#9658;</button>
+            <button class="icon-button" data-action="send-template" data-id="${template.id}" ${sendDisabled} title="Send">&#10148;</button>
             <button class="icon-button" data-action="edit-template-toggle" data-id="${template.id}" title="Edit">&#9998;</button>
             <button class="icon-button" data-action="delete-template" data-id="${template.id}" title="Delete">&#128465;&#65038;</button>
           </div>
