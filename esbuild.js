@@ -28,7 +28,7 @@ async function main() {
     format: 'cjs',
     platform: 'node',
     outfile: 'dist/extension.js',
-    external: ['vscode'],
+    external: ['vscode', 'serialport'],
     minify: production,
     sourcemap: !production,
     sourcesContent: false,

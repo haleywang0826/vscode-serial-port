@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A VS Code extension (`vscode-serial-port`) implementing a full-featured serial
 port tool: live monitoring, send/receive in hex or ASCII, RTS/DTR control,
 multiple ports open in parallel, log-to-file, and reusable send templates.
-Currently the repo only contains the dev-environment scaffold (build/lint/test
-tooling + a placeholder command) — feature work has not started yet.
+The Activity Bar panel (port picker, default settings, per-port sessions,
+send templates) and the `serialport`-backed I/O are implemented; see
+Architecture below for the module layout.
 
 ## Commands
 
@@ -26,9 +27,9 @@ Press `F5` in VS Code to launch an Extension Development Host with the
 extension loaded (this runs the `npm: watch` background task first via
 `.vscode/launch.json` / `.vscode/tasks.json`).
 
-There is currently one source file (`src/extension.ts`) and one test file
-(`src/test/extension.test.ts`), so "run a single test" just means running
-`npm test` — there's nothing yet to filter down to.
+There is currently one test file (`src/test/extension.test.ts`), so "run a
+single test" just means running `npm test` — there's nothing yet to filter
+down to.
 
 ## Architecture
 
@@ -55,9 +56,35 @@ manager, log persistence, and terminal/monitor view, rely on these
 `vscode.*` APIs rather than Node's raw `fs`/`child_process`, or this
 WSL-transparency property breaks.
 
-Serial I/O (not yet implemented) is planned to use the `serialport` npm
-package (prebuilt native bindings for win32/darwin/linux, x64+arm64) so
-packaging never requires a native build toolchain on the user's machine.
+Serial I/O uses the `serialport` npm package (prebuilt native bindings for
+win32/darwin/linux, x64+arm64) so packaging never requires a native build
+toolchain on the user's machine. Its native binding can't be bundled by
+esbuild, so `serialport` is in esbuild's `external` list and carved back out
+of `.vscodeignore`'s `node_modules/**` exclusion — `node_modules/serialport`
+and `node_modules/@serialport` must physically ship inside the `.vsix`.
+
+**Module layout** (`src/`):
+- `serial/connectionManager.ts` — `PortConnection` (one open port: I/O,
+  live baud-rate update, byte counters, hex/ascii + recording toggles, an
+  `OutputChannel`-backed log) and `ConnectionManager` (the open-ports
+  registry, keyed by device path).
+- `serial/format.ts` — hex↔bytes conversion and the hex-mode keystroke
+  filter, shared by the tree's stats display and the terminal.
+- `serial/pseudoterminal.ts` — the interactive per-port terminal: a
+  `vscode.Pseudoterminal` that echoes/buffers typed input itself (ptys don't
+  echo), rejects non-hex keystrokes while hex-send is on, and sends on Enter.
+- `tree/serialTreeProvider.ts` + `tree/treeItems.ts` — the
+  `TreeDataProvider` behind the Activity Bar view: port picker, default
+  settings, one collapsible section per open session, and send templates.
+  Node kinds and `contextValue`s are what `package.json`'s
+  `view/item/context` menu `when` clauses key off of for inline buttons.
+- `templates/templateStore.ts` — CRUD for send templates over
+  `context.globalState` (global, not workspace-scoped).
+
+Recording a session's traffic uses a `vscode.OutputChannel` rather than a
+file or a custom `TextDocumentContentProvider` — live, timestamped,
+TX/RX-marked, no save prompt, and no need to hand-roll incremental
+re-rendering of a virtual document.
 
 ## Publishing
 
@@ -78,10 +105,14 @@ fails with "'node' is not recognized" in this environment, invoke the
 underlying tool directly instead, e.g.:
 
 ```powershell
-& "E:\nodejs\node.exe" "d:\serialPort\esbuild.js"
-& "E:\nodejs\node.exe" "d:\serialPort\node_modules\eslint\bin\eslint.js" src
-& "E:\nodejs\node.exe" "d:\serialPort\node_modules\typescript\lib\tsc.js" -p . --outDir out
+Start-Process -FilePath "E:\nodejs\node.exe" -ArgumentList 'd:\serialPort\esbuild.js' -NoNewWindow -Wait -PassThru -RedirectStandardOutput out.log -RedirectStandardError err.log
 ```
+
+Direct `&`-invocation of a native exe (e.g. `& "E:\nodejs\node.exe" ...`) also
+silently produces no captured output in this shell, even though the process
+runs — always go through `Start-Process ... -RedirectStandardOutput/-RedirectStandardError`
+and read the redirected files back, for any native executable, not just for
+lifecycle-script cases.
 
 and for `npm install`, use `--ignore-scripts` then manually run the
 individual package's install script the same way (e.g.

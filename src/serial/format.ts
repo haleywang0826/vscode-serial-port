@@ -1,0 +1,47 @@
+const HEX_BYTE_RE = /^[0-9a-fA-F]{2}$/;
+
+/** Formats bytes as space-separated uppercase hex pairs, e.g. "0A FF 3C". */
+export function bytesToHex(data: Uint8Array): string {
+  return Array.from(data, (byte) => byte.toString(16).toUpperCase().padStart(2, '0')).join(' ');
+}
+
+/** Renders bytes as text, replacing non-printable control characters with '.'. */
+export function bytesToAscii(data: Uint8Array): string {
+  return Array.from(data, (byte) => (byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.')).join('');
+}
+
+export function formatBytes(data: Uint8Array, hex: boolean): string {
+  return hex ? bytesToHex(data) : bytesToAscii(data);
+}
+
+/**
+ * Parses a hex-mode send line ("0A FF 3C" or "0AFF3C") into bytes.
+ * Throws with a message suitable for surfacing directly to the user.
+ */
+export function hexStringToBytes(input: string): Uint8Array {
+  const compact = input.trim().replace(/\s+/g, '');
+  if (compact.length === 0) {
+    return new Uint8Array(0);
+  }
+  if (compact.length % 2 !== 0) {
+    throw new Error('Hex input must have an even number of digits.');
+  }
+  const bytes = new Uint8Array(compact.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    const pair = compact.slice(i * 2, i * 2 + 2);
+    if (!HEX_BYTE_RE.test(pair)) {
+      throw new Error(`Invalid hex byte "${pair}".`);
+    }
+    bytes[i] = parseInt(pair, 16);
+  }
+  return bytes;
+}
+
+/** True if `ch` is a character the hex-mode terminal input should accept while typing. */
+export function isHexInputChar(ch: string): boolean {
+  return /^[0-9a-fA-F ]$/.test(ch);
+}
+
+export function asciiStringToBytes(input: string): Uint8Array {
+  return new TextEncoder().encode(input);
+}

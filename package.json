@@ -29,12 +29,121 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "serialPort",
+          "title": "Serial Port",
+          "icon": "media/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "serialPort": [
+        {
+          "id": "serialPortExplorer",
+          "name": "Ports"
+        }
+      ]
+    },
     "commands": [
       {
-        "command": "serialPort.helloWorld",
-        "title": "Serial Port: Hello World"
+        "command": "serialPort.selectPort",
+        "title": "Serial Port: Select Port"
+      },
+      {
+        "command": "serialPort.openSelectedPort",
+        "title": "Serial Port: Open Selected Port",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "serialPort.closeSession",
+        "title": "Serial Port: Close Port",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "serialPort.alreadyOpenNoop",
+        "title": "Serial Port: Already Open",
+        "icon": "$(check)"
+      },
+      {
+        "command": "serialPort.editDefaultSetting",
+        "title": "Serial Port: Edit Default Setting"
+      },
+      {
+        "command": "serialPort.editSessionSetting",
+        "title": "Serial Port: Edit Session Setting"
+      },
+      {
+        "command": "serialPort.addTemplate",
+        "title": "Serial Port: Add Send Template",
+        "icon": "$(add)"
+      },
+      {
+        "command": "serialPort.editTemplate",
+        "title": "Serial Port: Edit Template"
+      },
+      {
+        "command": "serialPort.sendTemplate",
+        "title": "Serial Port: Send Template",
+        "icon": "$(send)"
       }
     ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "serialPort.openSelectedPort",
+          "when": "view == serialPortExplorer && viewItem == serialPort.portPicker",
+          "group": "inline"
+        },
+        {
+          "command": "serialPort.alreadyOpenNoop",
+          "when": "view == serialPortExplorer && viewItem == serialPort.portPicker.open",
+          "group": "inline"
+        },
+        {
+          "command": "serialPort.closeSession",
+          "when": "view == serialPortExplorer && viewItem == serialPort.session",
+          "group": "inline"
+        },
+        {
+          "command": "serialPort.addTemplate",
+          "when": "view == serialPortExplorer && viewItem == serialPort.templatesRoot",
+          "group": "inline"
+        },
+        {
+          "command": "serialPort.sendTemplate",
+          "when": "view == serialPortExplorer && viewItem == serialPort.templateRow",
+          "group": "inline"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "serialPort.closeSession",
+          "when": "false"
+        },
+        {
+          "command": "serialPort.alreadyOpenNoop",
+          "when": "false"
+        },
+        {
+          "command": "serialPort.editDefaultSetting",
+          "when": "false"
+        },
+        {
+          "command": "serialPort.editSessionSetting",
+          "when": "false"
+        },
+        {
+          "command": "serialPort.editTemplate",
+          "when": "false"
+        },
+        {
+          "command": "serialPort.sendTemplate",
+          "when": "false"
+        }
+      ]
+    },
     "problemMatchers": [
       {
         "name": "esbuild-watch",
@@ -71,6 +180,9 @@
     "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test"
+  },
+  "dependencies": {
+    "serialport": "^12.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

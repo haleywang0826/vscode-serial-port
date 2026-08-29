@@ -3,6 +3,8 @@
 src/**
 out/**
 node_modules/**
+!node_modules/serialport/**
+!node_modules/@serialport/**
 .gitignore
 .prettierrc
 eslint.config.mjs

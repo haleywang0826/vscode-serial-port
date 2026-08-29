@@ -22,8 +22,10 @@ the WSL filesystem you're working in.
 
 ## Status
 
-This repository currently contains the development scaffold only (build/lint/
-test/debug tooling plus a placeholder command) — feature work is in progress.
+The Activity Bar panel is implemented: pick and open ports, configure
+defaults, run multiple ports in parallel with a live session view (config,
+byte counters, hex send/recv toggles, recording), an interactive terminal per
+open port, and reusable send templates.
 
 ## Development
 
@@ -33,8 +35,7 @@ npm run watch     # incremental esbuild build
 ```
 
 Press `F5` in VS Code to launch an Extension Development Host with the
-extension loaded, then run **Serial Port: Hello World** from the Command
-Palette to confirm it's working.
+extension loaded — the **Serial Port** icon appears in the Activity Bar.
 
 ```bash
 npm run lint       # eslint
