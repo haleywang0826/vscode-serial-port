@@ -73,9 +73,21 @@ export function hexStringToBytes(input: string): Uint8Array {
   return bytes;
 }
 
-/** True if `ch` is a character the hex-mode terminal input should accept while typing. */
-export function isHexInputChar(ch: string): boolean {
-  return /^[0-9a-fA-F ]$/.test(ch);
+/** True if `ch` is a hex digit — the only character hex-mode input should accept while typing.
+ * Spaces between byte pairs are auto-inserted (see `appendHexInputChar`), so a typed space is
+ * simply ignored rather than accepted verbatim. */
+export function isHexDigitChar(ch: string): boolean {
+  return /^[0-9a-fA-F]$/.test(ch);
+}
+
+/** Appends `ch` (assumed to pass `isHexDigitChar`) to `current`, auto-inserting a space first
+ * when `ch` starts a new byte pair — e.g. typing "0","A","1" yields "0A 1", so hex-send input
+ * (terminal and template payload fields) always reads as grouped "AA BB CC" bytes without the
+ * user having to type the separating spaces themselves. */
+export function appendHexInputChar(current: string, ch: string): string {
+  const digitsOnly = current.replace(/\s+/g, '');
+  const needsSpace = digitsOnly.length > 0 && digitsOnly.length % 2 === 0;
+  return needsSpace ? `${current} ${ch}` : `${current}${ch}`;
 }
 
 export function asciiStringToBytes(input: string): Uint8Array {

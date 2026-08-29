@@ -91,6 +91,18 @@ h3 {
   gap: 2px;
 }
 
+.row.port-row {
+  flex-wrap: nowrap;
+}
+
+.row.port-row select {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .config-grid {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -222,6 +234,11 @@ button:disabled {
   min-width: 0;
   flex: 1 1 auto;
   word-break: break-all;
+}
+
+.session-name {
+  font-weight: 400;
+  font-size: var(--vscode-font-size, 13px);
 }
 
 .session-body {

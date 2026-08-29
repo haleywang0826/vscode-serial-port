@@ -60,6 +60,41 @@
     return prefix === 'add' ? ui.addTemplateDraft : ui.editTemplateDraft;
   }
 
+  /** True if `ch` is a hex digit; mirrors `isHexDigitChar` in src/serial/format.ts. */
+  function isHexDigitChar(ch) {
+    return /^[0-9a-fA-F]$/.test(ch);
+  }
+
+  /** Strips non-hex characters and regroups the rest into "AA BB CC" byte pairs — the same
+   * auto-spacing rule the terminal applies while hex-send is on (see appendHexInputChar in
+   * src/serial/format.ts), applied here to the whole field instead of one keystroke at a time. */
+  function formatHexInput(raw) {
+    const digits = raw.replace(/[^0-9a-fA-F]/g, '');
+    const pairs = [];
+    for (let i = 0; i < digits.length; i += 2) {
+      pairs.push(digits.slice(i, i + 2));
+    }
+    return pairs.join(' ');
+  }
+
+  /** Maps "N hex digits were before the cursor" back to a caret offset in the reformatted
+   * string, so reformatting on every keystroke doesn't jump the cursor to the end. */
+  function hexCursorForDigitCount(formatted, digitCount) {
+    if (digitCount <= 0) {
+      return 0;
+    }
+    let seen = 0;
+    for (let i = 0; i < formatted.length; i++) {
+      if (isHexDigitChar(formatted[i])) {
+        seen++;
+        if (seen === digitCount) {
+          return i + 1;
+        }
+      }
+    }
+    return formatted.length;
+  }
+
   function renderConfigControls(prefix, config, locked, lockBaud) {
     const showCustomBaud = ui.customBaud[prefix] || !BAUD_RATE_PRESETS.includes(config.baudRate);
     const lockedAttrs = locked ? 'disabled title="Reopen the port to change this"' : '';
@@ -136,7 +171,7 @@
             ? ''
             : `
               <div class="section-body">
-                <div class="row">
+                <div class="row port-row">
                   <select id="port-select">${options}</select>
                   <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to Sessions">+</button>
                   <button class="icon-button" data-action="refresh-ports" title="Refresh Port List">&#8635;</button>
@@ -180,7 +215,7 @@
         <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
           <div class="session-title">
             <span class="twisty ${collapsed ? '' : 'expanded'}"></span>
-            <strong class="truncate">${escapeHtml(session.path)}</strong>
+            <strong class="truncate session-name">${escapeHtml(session.path)}</strong>
           </div>
           <div class="row session-actions">
             ${toggleButton}
@@ -411,7 +446,15 @@
     }
     if (el.matches('.template-form select[name="format"]')) {
       const form = el.closest('.template-form');
-      draftFor(form.dataset.draft === 'add' ? 'add' : 'edit').format = el.value;
+      const draft = draftFor(form.dataset.draft === 'add' ? 'add' : 'edit');
+      draft.format = el.value;
+      if (el.value === 'hex') {
+        draft.data = formatHexInput(draft.data);
+        const textarea = form.querySelector('textarea[name="data"]');
+        if (textarea) {
+          textarea.value = draft.data;
+        }
+      }
     }
   });
 
@@ -425,7 +468,19 @@
     if (el.name === 'name') {
       draft.name = el.value;
     } else if (el.name === 'data') {
-      draft.data = el.value;
+      if (draft.format === 'hex') {
+        const cursor = el.selectionStart;
+        const digitsBeforeCursor = el.value.slice(0, cursor).replace(/[^0-9a-fA-F]/g, '').length;
+        const formatted = formatHexInput(el.value);
+        draft.data = formatted;
+        if (formatted !== el.value) {
+          el.value = formatted;
+          const newCursor = hexCursorForDigitCount(formatted, digitsBeforeCursor);
+          el.setSelectionRange(newCursor, newCursor);
+        }
+      } else {
+        draft.data = el.value;
+      }
     }
   });
 
@@ -512,7 +567,11 @@
           const template = lastState.templates.find((t) => t.id === id);
           if (template) {
             ui.editingTemplateId = id;
-            ui.editTemplateDraft = { name: template.name, format: template.format, data: template.data };
+            ui.editTemplateDraft = {
+              name: template.name,
+              format: template.format,
+              data: template.format === 'hex' ? formatHexInput(template.data) : template.data,
+            };
           }
         }
         render();

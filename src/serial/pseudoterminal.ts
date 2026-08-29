@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { PortConnection, TrafficEvent } from './connectionManager';
-import { asciiStringToBytes, formatBytesForTerminal, hexStringToBytes, isHexInputChar } from './format';
+import { appendHexInputChar, asciiStringToBytes, formatBytesForTerminal, hexStringToBytes, isHexDigitChar } from './format';
 
 const ENTER = '\r';
 const BACKSPACE = '\x7f';
@@ -31,8 +31,9 @@ export interface TerminalColors {
  * direction, formatted per the connection's hex/ascii toggles, optionally timestamped) and sends
  * whatever the user types on Enter. TX is rendered from the connection's `onDidTraffic` event, the
  * same source the file log reads from, so a template send (or any other write) shows up here too —
- * not just terminal-typed input. While "hex send" is on, keystrokes that aren't hex digits/spaces
- * are rejected as they're typed.
+ * not just terminal-typed input. While "hex send" is on, non-hex-digit keystrokes are rejected as
+ * they're typed, and a space is auto-inserted between each typed byte pair (see
+ * `appendHexInputChar`) so the user never has to type the separating spaces themselves.
  *
  * The input line is pinned to the terminal's actual bottom row via an ANSI scroll region
  * (DECSTBM, `\x1b[<top>;<bottom>r`) confined to rows 1..rows-1 — the same mechanism tmux's status
@@ -120,10 +121,10 @@ export function createSerialTerminal(connection: PortConnection, colors: Termina
         if (ch < ' ') {
           continue; // drop other control chars / escape sequences
         }
-        if (connection.hexSend && !isHexInputChar(ch)) {
-          continue; // reject non-hex keystrokes silently while in hex-send mode
+        if (connection.hexSend && !isHexDigitChar(ch)) {
+          continue; // reject non-hex keystrokes silently; spaces between byte pairs are auto-inserted
         }
-        line += ch;
+        line = connection.hexSend ? appendHexInputChar(line, ch) : line + ch;
         redrawInputLine();
       }
     },
