@@ -51,16 +51,18 @@ export function formatBytesForTerminal(data: Uint8Array, hex: boolean): string {
 }
 
 /**
- * Parses a hex-mode send line ("0A FF 3C" or "0AFF3C") into bytes.
+ * Parses a hex-mode send line ("0A FF 3C" or "0AFF3C") into bytes. An odd number of digits is
+ * padded with a trailing 0 (e.g. "0A3" -> "0A 30") rather than rejected, since a user who stops
+ * mid-byte almost always means the low nibble to be 0, not an error to correct.
  * Throws with a message suitable for surfacing directly to the user.
  */
 export function hexStringToBytes(input: string): Uint8Array {
-  const compact = input.trim().replace(/\s+/g, '');
+  let compact = input.trim().replace(/\s+/g, '');
   if (compact.length === 0) {
     return new Uint8Array(0);
   }
   if (compact.length % 2 !== 0) {
-    throw new Error('Hex input must have an even number of digits.');
+    compact += '0';
   }
   const bytes = new Uint8Array(compact.length / 2);
   for (let i = 0; i < bytes.length; i++) {
