@@ -14,27 +14,56 @@ body {
 }
 
 h3 {
-  margin: 0 0 6px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--vscode-descriptionForeground);
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
 }
 
 .panel-section {
-  margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
 }
 
-.panel-section:last-child {
-  border-bottom: none;
+.panel-section:first-child {
+  border-top: none;
 }
 
 .section-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 0;
+}
+
+.section-header > .icon-button {
+  margin-left: auto;
+}
+
+.section-body {
+  padding: 2px 0 10px;
+}
+
+.twisty {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.twisty::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 4px 0 4px 5px;
+  border-color: transparent transparent transparent var(--vscode-icon-foreground, var(--vscode-foreground));
+  transition: transform 0.1s ease;
+}
+
+.twisty.expanded::before {
+  transform: rotate(90deg);
 }
 
 .collapsible-header {

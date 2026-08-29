@@ -128,16 +128,19 @@
     return `
       <section class="panel-section">
         <div class="section-header collapsible-header" data-action="toggle-port-section">
-          <h3>${ui.portCollapsed ? '▸' : '▾'} Port</h3>
+          <span class="twisty ${ui.portCollapsed ? '' : 'expanded'}"></span>
+          <h3>Port</h3>
         </div>
         ${
           ui.portCollapsed
             ? ''
             : `
-              <div class="row">
-                <select id="port-select">${options}</select>
-                <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to sessions">+</button>
-                <button class="icon-button" data-action="refresh-ports" title="Refresh port list">&#8635;</button>
+              <div class="section-body">
+                <div class="row">
+                  <select id="port-select">${options}</select>
+                  <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to sessions">+</button>
+                  <button class="icon-button" data-action="refresh-ports" title="Refresh port list">&#8635;</button>
+                </div>
               </div>`
         }
       </section>`;
@@ -186,16 +189,18 @@
   }
 
   function renderSessions() {
-    const chevron = ui.sessionsCollapsed ? '▸' : '▾';
     const body = ui.sessionsCollapsed
       ? ''
-      : lastState.sessions.length === 0
-        ? '<p class="muted">No ports added.</p>'
-        : lastState.sessions.map(renderSession).join('');
+      : `<div class="section-body">${
+          lastState.sessions.length === 0
+            ? '<p class="muted">No ports added.</p>'
+            : lastState.sessions.map(renderSession).join('')
+        }</div>`;
     return `
       <section class="panel-section">
         <div class="section-header collapsible-header" data-action="toggle-sessions-section">
-          <h3>${chevron} Sessions</h3>
+          <span class="twisty ${ui.sessionsCollapsed ? '' : 'expanded'}"></span>
+          <h3>Sessions</h3>
         </div>
         ${body}
       </section>`;
@@ -267,17 +272,19 @@
 
   function renderTemplates() {
     const addForm = ui.addingTemplate ? renderTemplateForm('add', ui.addTemplateDraft) : '';
-    const chevron = ui.templatesCollapsed ? '▸' : '▾';
     const body = ui.templatesCollapsed
       ? ''
       : `
-        ${renderTemplateTargetSelect()}
-        ${addForm}
-        ${lastState.templates.map(renderTemplateRow).join('')}`;
+        <div class="section-body">
+          ${renderTemplateTargetSelect()}
+          ${addForm}
+          ${lastState.templates.map(renderTemplateRow).join('')}
+        </div>`;
     return `
       <section class="panel-section">
         <div class="section-header collapsible-header" data-action="toggle-templates">
-          <h3>${chevron} Send Templates</h3>
+          <span class="twisty ${ui.templatesCollapsed ? '' : 'expanded'}"></span>
+          <h3>Send Templates</h3>
           <button class="icon-button" data-action="add-template-toggle" title="Add template">+</button>
         </div>
         ${body}
@@ -297,23 +304,26 @@
       ${renderTemplates()}
       <section class="panel-section">
         <div class="section-header collapsible-header" data-action="toggle-default-settings">
-          <h3>${ui.defaultSettingsCollapsed ? '▸' : '▾'} Default Settings</h3>
+          <span class="twisty ${ui.defaultSettingsCollapsed ? '' : 'expanded'}"></span>
+          <h3>Default Settings</h3>
         </div>
         ${
           ui.defaultSettingsCollapsed
             ? ''
             : `
-              ${renderLogFolderRow()}
-              ${renderConfigControls('default', lastState.defaultConfig, false, false)}
-              <div class="row checkboxes">
-                <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexSend" ${lastState.defaultHexSend ? 'checked' : ''}> Hex Send</label>
-                <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexRecv" ${lastState.defaultHexRecv ? 'checked' : ''}> Hex Recv</label>
-              </div>
-              <div class="row">
-                <label>TX Color</label>
-                <input type="color" data-action="terminal-color" data-which="tx" value="${lastState.txColor}">
-                <label>RX Color</label>
-                <input type="color" data-action="terminal-color" data-which="rx" value="${lastState.rxColor}">
+              <div class="section-body">
+                ${renderLogFolderRow()}
+                ${renderConfigControls('default', lastState.defaultConfig, false, false)}
+                <div class="row checkboxes">
+                  <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexSend" ${lastState.defaultHexSend ? 'checked' : ''}> Hex Send</label>
+                  <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexRecv" ${lastState.defaultHexRecv ? 'checked' : ''}> Hex Recv</label>
+                </div>
+                <div class="row">
+                  <label>TX Color</label>
+                  <input type="color" data-action="terminal-color" data-which="tx" value="${lastState.txColor}">
+                  <label>RX Color</label>
+                  <input type="color" data-action="terminal-color" data-which="rx" value="${lastState.rxColor}">
+                </div>
               </div>`
         }
       </section>

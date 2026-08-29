@@ -140,9 +140,13 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   (`removeSession`) that drops it from `sessionOrder`/`closedMeta` for
   good. All four top-level sections — Port, Sessions, Send Templates,
   Default Settings — share one `.section-header.collapsible-header`
-  pattern (chevron + uppercase title, click anywhere on the header to
-  fold), the same explorer-panel convention VS Code's own Explorer view
-  uses for its top-level groups (OPEN EDITORS, workspace folders, etc.);
+  pattern: a rotating `.twisty` CSS-triangle (pure `border-*` trick, no
+  icon font/codicon dependency) plus a bold, normal-case `<h3>` title,
+  separated by a `.panel-section`'s top border rather than a bottom one so
+  the divider always sits directly above the next title — matching how
+  VS Code's own Explorer draws the boundary between collapsible sections
+  (e.g. Outline/Timeline) rather than the initial uppercase-muted-11px
+  treatment this used before. Click anywhere on the header to fold.
   Port and Sessions default expanded, Send Templates and Default Settings
   default collapsed. The port picker itself is just a `<select>` plus a
   "+" icon button (`addPort`) that adds the selected path to
