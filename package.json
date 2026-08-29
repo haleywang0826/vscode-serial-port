@@ -1,0 +1,63 @@
+{
+  "name": "vscode-serial-port",
+  "displayName": "Serial Port",
+  "description": "Full-featured serial port tool for VS Code: monitor, send/receive (hex or ASCII), RTS/DTR control, multiple ports in parallel, log-to-file, and reusable send templates. Works transparently from WSL windows against physical Windows ports.",
+  "version": "0.0.1",
+  "publisher": "REPLACE_ME_PUBLISHER_ID",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/haleywang0826/vscode-serial-port"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "serial",
+    "serial port",
+    "com port",
+    "uart",
+    "embedded",
+    "wsl"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "serialPort.helloWorld",
+        "title": "Serial Port: Hello World"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "package": "node esbuild.js --production",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "npm run compile-tests && npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^26.4.0",
+    "@types/vscode": "^1.134.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.9.1",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.68.0"
+  }
+}
