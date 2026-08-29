@@ -214,10 +214,13 @@ button:disabled {
 }
 
 .session-card {
-  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
-  border-radius: 3px;
-  padding: 6px 8px;
-  margin-bottom: 6px;
+  padding: 6px 0;
+  border-top: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35))));
+}
+
+.session-card:first-child {
+  border-top: none;
+  padding-top: 0;
 }
 
 .session-header {

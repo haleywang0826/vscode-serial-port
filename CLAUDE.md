@@ -134,17 +134,24 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   restored on reopen. `buildState()` builds each `PanelSession` (with a
   `connected: boolean` flag) from the live `PortConnection` when open, or
   from `closedMeta` (falling back to the defaults) when not. `main.js`
-  renders each session as its own bordered `.session-card` (the same
-  `.twisty` chevron used by the top-level sections, plus path, in a
-  `.session-header`, expanding into a `.session-body` underneath) with
-  an open/close toggle button (`togglePort`) plus a separate remove button
-  (`removeSession`) that drops it from `sessionOrder`/`closedMeta` for
-  good. All four top-level sections — Port, Sessions, Send Templates,
-  Default Settings — share one `.section-header.collapsible-header`
-  pattern: a rotating `.twisty` (two `border-*` edges of a small box, no
-  icon font/codicon dependency — a filled CSS triangle was tried first but
-  reads as a solid arrowhead rather than the thin two-stroke chevron VS
-  Code's codicons actually use) plus a bold, normal-case `<h3>` title,
+  renders each session as a `.session-card` (the same `.twisty` chevron
+  used by the top-level sections, plus path, in a `.session-header`,
+  expanding into a `.session-body` underneath) with an open/close toggle
+  button (`togglePort`) plus a separate remove button (`removeSession`)
+  that drops it from `sessionOrder`/`closedMeta` for good. `.session-card`
+  is separated from its neighbor by a single `border-top` divider (skipped
+  on `:first-child`) rather than a full border/box — the same divider
+  treatment `.panel-section` uses between the four top-level sections —
+  so a stack of session cards reads as one continuous list instead of a
+  stack of separate boxes. All four top-level sections — Port, Sessions,
+  Send Templates, Default Settings — share one
+  `.section-header.collapsible-header` pattern: a rotating `.twisty` (two
+  `border-*` edges of a small box — a filled CSS triangle was tried first
+  but reads as a solid arrowhead rather than the thin two-stroke chevron
+  VS Code's codicons actually use, and the twisty itself stays a plain CSS
+  shape rather than a codicon glyph, since it's driven by a `transform:
+  rotate()` transition that a font glyph can't animate as smoothly) plus a
+  bold, normal-case `<h3>` title,
   separated by a `.panel-section`'s top border rather than a bottom one so
   the divider always sits directly above the next title — matching how
   VS Code's own Explorer/Extensions views draw the boundary between
@@ -162,14 +169,36 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   (session cards, dropdown borders, template row dividers) for the same
   reason. Click anywhere on the header to fold. Every action button in the
   panel (`.icon-button` — add/refresh/toggle/remove/change-folder/
-  template actions) is a flat, borderless 22×22 glyph button matching VS
-  Code's own toolbar icons (e.g. the Search view's refresh/filter icons) —
+  template actions) is a flat, borderless 22×22 button matching VS Code's
+  own toolbar icons (e.g. the Search view's refresh/filter icons) —
   transparent by default, with a `--vscode-toolbar-hoverBackground` tint
   on hover — rather than a filled `--vscode-button-background` pill, which
-  is reserved for real primary actions (Send Templates' Save/Cancel).
+  is reserved for real primary actions (Send Templates' Save/Cancel). The
+  add-port (`+`) and refresh-ports buttons render the actual VS Code
+  Codicon glyphs (`codicon-add`/`codicon-refresh`, `<i class="codicon
+  codicon-*">`) rather than a hand-picked Unicode character — Unicode
+  glyphs (`+`, `↻`, etc.) render thinner/smaller and inconsistently across
+  platforms even at the same declared `font-size`, so they never visually
+  matched another extension's native-toolbar-style buttons; codicon is the
+  exact font VS Code's own UI uses, guaranteeing pixel/weight parity. The
+  font is bundled by copying `node_modules/@vscode/codicons/dist/{codicon.css,codicon.ttf}`
+  into `media/webview/` at dev time (not referenced from `node_modules` at
+  runtime, so no `.vscodeignore` carve-out like `serialport`'s is needed —
+  everything the webview loads already lives inside the shipped
+  `media/webview/` directory) and linked from `getHtml()` alongside
+  `style.css`; the webview CSP's `font-src` directive was added
+  specifically to allow it to load. Other icon buttons not yet migrated to
+  codicon (toggle/remove/change-folder/template actions) still render a
+  literal Unicode glyph sized via the button's own `font-size: 16px`. Every
+  `.icon-button` is sized in `border-box` (see the global `box-sizing:
+  border-box` reset in `style.css`) so a button that also carries a border
+  (e.g. the "closed" toggle state) stays exactly 22×22 like its
+  border-less siblings — otherwise the extra border width would inflate
+  that button's box and throw off the flex-centered icon glyph relative to
+  the row it sits in.
   Port and Sessions default expanded, Send Templates and Default Settings
-  default collapsed. The port picker itself is just a `<select>` plus a
-  "+" icon button (`addPort`) that adds the selected path to
+  default collapsed. The port picker itself is just a `<select>` plus an
+  add-port icon button (`addPort`) that adds the selected path to
   `sessionOrder` and opens it. `media/webview/main.js` is vanilla
   JS with no framework or bundler — it does a full DOM re-render from that
   state on every message and posts action messages back

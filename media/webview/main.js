@@ -173,8 +173,8 @@
               <div class="section-body">
                 <div class="row port-row">
                   <select id="port-select">${options}</select>
-                  <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to Sessions">+</button>
-                  <button class="icon-button" data-action="refresh-ports" title="Refresh Port List">&#8635;</button>
+                  <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to Sessions"><i class="codicon codicon-add"></i></button>
+                  <button class="icon-button" data-action="refresh-ports" title="Refresh Port List"><i class="codicon codicon-refresh"></i></button>
                 </div>
               </div>`
         }
@@ -208,8 +208,8 @@
           <div class="stats muted">TX: ${session.stats.bytesSent} bytes &nbsp; RX: ${session.stats.bytesReceived} bytes</div>
         </div>`;
     const toggleButton = session.connected
-      ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close Port">&#9632;</button>`
-      : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open Port">&#9213;</button>`;
+      ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close Port">&#11200;</button>`
+      : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open Port">&#11208;</button>`;
     return `
       <div class="session-card">
         <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
