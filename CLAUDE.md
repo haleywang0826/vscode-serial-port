@@ -70,6 +70,15 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   open-ports registry, keyed by device path).
 - `serial/format.ts` — hex↔bytes conversion and the hex-mode keystroke
   filter, shared by the tree's stats display and the terminal.
+  `bytesToAsciiForTerminal`/`formatBytesForTerminal` are terminal-only
+  variants that pass an embedded ANSI SGR (color) escape sequence
+  (`ESC [ ... m`) through verbatim — so a device that colors its own serial
+  output renders as intended — while dropping any other escape sequence
+  (cursor movement, scroll-region changes, etc.), since letting a device
+  touch the cursor or scroll region could corrupt the terminal's pinned
+  input line. The plain `formatBytes`/`bytesToAscii` (used by the file log)
+  are untouched by this and never see passthrough — the log stays
+  plain-text.
 - `serial/pseudoterminal.ts` — the interactive per-port terminal: a
   `vscode.Pseudoterminal` that echoes/buffers typed input itself (ptys don't
   echo), rejects non-hex keystrokes while hex-send is on, and sends on
@@ -83,13 +92,23 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   text scrolling independently above it. TX lines are rendered from
   `PortConnection.onDidTraffic`, not echoed locally on Enter — this is what
   makes every write show up here regardless of source (terminal-typed or a
-  Send Template), matching what the file log records. TX is cyan, RX is
-  green, and errors stay red (`\x1b[31m`, pre-existing); when a session's
-  "Show timestamp" checkbox is on, each line gets a dim `[ISO timestamp]
-  DIRECTION` prefix using the exact timestamp `onDidTraffic` carries — the
-  same value `appendLog` writes to the file, computed once per event so the
-  two can never disagree. The checkbox only gates the terminal prefix; the
-  file log always includes a timestamp regardless of it.
+  Send Template), matching what the file log records. TX/RX are colored per
+  the user-configurable `TerminalColors { tx, rx }` (hex strings, set in
+  Default Settings), rendered as 24-bit ANSI truecolor
+  (`\x1b[38;2;R;G;Bm`); errors stay red (`\x1b[31m`). `createSerialTerminal`
+  takes the same `TerminalColors` object by reference from
+  `SerialPanelProvider` for every open terminal, so changing a color live-
+  updates every already-open terminal without reopening the port. When a
+  session's "Show timestamp" checkbox is on, each line gets a dim
+  `[local-ISO timestamp] DIRECTION` prefix using the exact timestamp
+  `onDidTraffic` carries — the same value `appendLog` writes to the file,
+  computed once per event so the two can never disagree; the timestamp is
+  formatted in the system's local timezone with its UTC offset (see
+  `toLocalIsoString` in `connectionManager.ts` — `Date#toISOString()` always
+  renders UTC, which is wrong for this). The checkbox only gates the
+  terminal prefix; the file log always includes a timestamp regardless of
+  it. Ctrl+L clears the screen, matching bash/zsh readline's clear-screen
+  binding and other terminal-based tools' convention.
 - `webview/serialPanelProvider.ts` + `media/webview/{main.js, style.css}` —
   the Activity Bar view is a `vscode.WebviewViewProvider`, not a
   `TreeDataProvider`. It was a tree view originally, but `TreeItem` can't
@@ -98,8 +117,9 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   both were hard requirements, so the presentation layer moved to a webview
   where a real `<select>` and `<button>` do both for free.
   `serialPanelProvider.ts` builds the nonce/CSP-gated HTML, serializes all
-  panel state (ports, selected port, default config/hex, resolved log
-  folder, sessions, templates) via `buildState()`, and pushes it to the
+  panel state (ports, selected port, default config/hex, TX/RX terminal
+  colors, resolved log folder, sessions, templates) via `buildState()`, and
+  pushes it to the
   webview as `{type: 'state', state}` on resolve, on visibility change, on
   an explicit `refreshPorts` message, and (debounced 150ms) whenever
   `ConnectionManager.onDidChange` fires. Sessions are **persistent**, not
@@ -114,17 +134,22 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   restored on reopen. `buildState()` builds each `PanelSession` (with a
   `connected: boolean` flag) from the live `PortConnection` when open, or
   from `closedMeta` (falling back to the defaults) when not. `main.js`
-  renders each session with an open/close toggle button (`togglePort`)
-  plus a separate remove button (`removeSession`) that drops it from
-  `sessionOrder`/`closedMeta` for good; the port picker itself is just a
-  `<select>` plus a "+" icon button (`addPort`) that adds the selected
-  path to `sessionOrder` and opens it. `media/webview/main.js` is vanilla
+  renders each session as a flat, indented tree row (chevron + path,
+  matching VS Code's File Explorer look, not a bordered card) with an
+  open/close toggle button (`togglePort`) plus a separate remove button
+  (`removeSession`) that drops it from `sessionOrder`/`closedMeta` for
+  good; expanding a row indents its config/checkboxes/log-line/stats
+  underneath, set off by a `.tree-children` left border matching the
+  Explorer's indent guide. The port picker itself is just a `<select>`
+  plus a "+" icon button (`addPort`) that adds the selected path to
+  `sessionOrder` and opens it. `media/webview/main.js` is vanilla
   JS with no framework or bundler — it does a full DOM re-render from that
   state on every message and posts action messages back
   (`selectPort`, `addPort`, `togglePort`, `removeSession`, `refreshPorts`,
-  `updateDefaultSetting`, `updateDefaultCheckbox`, `updateSessionBaudRate`,
-  `setCheckbox`, `addTemplate`, `updateTemplate`, `deleteTemplate`,
-  `sendTemplate`, `browseLogFolder`, `clearLogFolder`, `openLogFile`); it
+  `updateDefaultSetting`, `updateDefaultCheckbox`, `updateTerminalColor`,
+  `updateSessionBaudRate`, `setCheckbox`, `addTemplate`, `updateTemplate`,
+  `deleteTemplate`, `sendTemplate`, `browseLogFolder`, `clearLogFolder`,
+  `openLogFile`); it
   keeps in-progress form edits and fold state (Default Settings and Send
   Templates both default to collapsed) in local JS state (not the pushed
   state) so an unrelated push (e.g. another port's byte counter) can't

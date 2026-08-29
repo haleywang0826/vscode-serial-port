@@ -14,6 +14,8 @@
     defaultConfig: { baudRate: 115200, dataBits: 8, parity: 'none', stopBits: 1 },
     defaultHexSend: false,
     defaultHexRecv: false,
+    txColor: '#00cccc',
+    rxColor: '#33cc33',
     logFolder: '',
     logFolderIsCustom: false,
     sessions: [],
@@ -137,10 +139,10 @@
     const collapsed = ui.collapsedSessions.has(session.path);
     const chevron = collapsed ? '▸' : '▾';
     const statusBadge = session.connected ? '' : '<span class="status-closed">closed</span>';
-    const body = collapsed
+    const children = collapsed
       ? ''
       : `
-        <div class="session-body">
+        <div class="tree-children">
           ${renderConfigControls(prefix, session.config, true, !session.connected)}
           <div class="row checkboxes">
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
@@ -162,15 +164,16 @@
       ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close port">&#9632;</button>`
       : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open port">&#9658;</button>`;
     return `
-      <div class="session-card">
-        <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
-          <strong>${chevron} ${escapeHtml(session.path)}</strong>${statusBadge}
+      <div class="tree-node">
+        <div class="tree-item collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
+          <span class="tree-twisty">${chevron}</span>
+          <span class="truncate">${escapeHtml(session.path)}</span>${statusBadge}
           <div class="row session-actions">
             ${toggleButton}
             <button class="icon-button" data-action="remove-session" data-path="${escapeHtml(session.path)}" title="Remove">&#10005;</button>
           </div>
         </div>
-        ${body}
+        ${children}
       </div>`;
   }
 
@@ -293,6 +296,12 @@
               <div class="row checkboxes">
                 <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexSend" ${lastState.defaultHexSend ? 'checked' : ''}> Hex Send</label>
                 <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexRecv" ${lastState.defaultHexRecv ? 'checked' : ''}> Hex Recv</label>
+              </div>
+              <div class="row">
+                <label>TX Color</label>
+                <input type="color" data-action="terminal-color" data-which="tx" value="${lastState.txColor}">
+                <label>RX Color</label>
+                <input type="color" data-action="terminal-color" data-which="rx" value="${lastState.rxColor}">
               </div>`
         }
       </section>
@@ -365,6 +374,10 @@
     }
     if (el.matches('[data-action="default-checkbox"]')) {
       postMessage({ type: 'updateDefaultCheckbox', checkbox: el.dataset.checkbox, value: el.checked });
+      return;
+    }
+    if (el.matches('[data-action="terminal-color"]')) {
+      postMessage({ type: 'updateTerminalColor', which: el.dataset.which, value: el.value });
       return;
     }
     if (el.matches('[data-action="template-target-select"]')) {

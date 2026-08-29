@@ -1,22 +1,29 @@
 import * as vscode from 'vscode';
 import { PortConnection, TrafficEvent } from './connectionManager';
-import { asciiStringToBytes, formatBytes, hexStringToBytes, isHexInputChar } from './format';
+import { asciiStringToBytes, formatBytesForTerminal, hexStringToBytes, isHexInputChar } from './format';
 
 const ENTER = '\r';
 const BACKSPACE = '\x7f';
 const CTRL_C = '\x03';
+const CTRL_L = '\x0c';
 
 const DEFAULT_ROWS = 24;
 
 const RESET = '\x1b[0m';
 const DIM = '\x1b[90m';
-const TX_COLOR = '\x1b[36m';
-const RX_COLOR = '\x1b[32m';
 const ERROR_COLOR = '\x1b[31m';
 
 export interface SerialTerminal {
   terminal: vscode.Terminal;
   dispose(): void;
+}
+
+/** User-configurable TX/RX terminal colors (hex, e.g. "#00cccc"), shared by reference from
+ * `SerialPanelProvider` so a color change in Default Settings applies live to every already-open
+ * terminal without needing to reopen the port. */
+export interface TerminalColors {
+  tx: string;
+  rx: string;
 }
 
 /**
@@ -32,8 +39,12 @@ export interface SerialTerminal {
  * line and htop's header use. Incoming/echoed text is written into that confined region (so it
  * scrolls independently), while the last row sits outside the region and is only ever redrawn in
  * place, never scrolled — that's what keeps it pinned even when there isn't much content yet.
+ *
+ * Ctrl+L clears the screen, matching the same convention used by bash/zsh's readline
+ * clear-screen binding, tmux, and other terminal-based tools, so it works the way anyone coming
+ * from a terminal would expect without needing a separate extension command.
  */
-export function createSerialTerminal(connection: PortConnection): SerialTerminal {
+export function createSerialTerminal(connection: PortConnection, colors: TerminalColors): SerialTerminal {
   const writeEmitter = new vscode.EventEmitter<string>();
   const closeEmitter = new vscode.EventEmitter<void>();
   let line = '';
@@ -54,7 +65,7 @@ export function createSerialTerminal(connection: PortConnection): SerialTerminal
   };
 
   const trafficSub = connection.onDidTraffic((event) => {
-    printAboveInput(formatTrafficLine(connection, event));
+    printAboveInput(formatTrafficLine(connection, event, colors));
   });
 
   const updateSub = connection.onDidUpdate(() => redrawInputLine());
@@ -69,7 +80,7 @@ export function createSerialTerminal(connection: PortConnection): SerialTerminal
         rows = initialDimensions.rows;
       }
       setScrollRegion();
-      printAboveInput(`Connected to ${connection.path}. Type data and press Enter to send.\r\n`);
+      printAboveInput(`Connected to ${connection.path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`);
     },
     close: () => {
       writeEmitter.fire('\x1b[r');
@@ -98,6 +109,11 @@ export function createSerialTerminal(connection: PortConnection): SerialTerminal
         }
         if (ch === CTRL_C) {
           line = '';
+          redrawInputLine();
+          continue;
+        }
+        if (ch === CTRL_L) {
+          writeEmitter.fire('\x1b[2J\x1b[3J\x1b[H');
           redrawInputLine();
           continue;
         }
@@ -132,13 +148,28 @@ function promptFor(connection: PortConnection): string {
   return connection.hexSend ? 'hex> ' : '> ';
 }
 
-/** Renders one TX/RX event for the terminal: colored by direction, optionally prefixed with the
- * shared timestamp from the event (the same value written to the file log, never recomputed). */
-function formatTrafficLine(connection: PortConnection, event: TrafficEvent): string {
+/** Renders one TX/RX event for the terminal: colored by direction using the user-configured
+ * `colors`, optionally prefixed with the shared timestamp from the event (the same value written
+ * to the file log, never recomputed). */
+function formatTrafficLine(connection: PortConnection, event: TrafficEvent, colors: TerminalColors): string {
   const hex = event.direction === 'TX' ? connection.hexSend : connection.hexRecv;
-  const color = event.direction === 'TX' ? TX_COLOR : RX_COLOR;
+  const color = ansiTruecolor(event.direction === 'TX' ? colors.tx : colors.rx);
   const prefix = connection.showTimestamp ? `${DIM}[${event.timestamp}] ${event.direction}${RESET} ` : '';
-  return `${prefix}${color}${formatBytes(event.bytes, hex)}${RESET}\r\n`;
+  return `${prefix}${color}${formatBytesForTerminal(event.bytes, hex)}${RESET}\r\n`;
+}
+
+/** Converts a "#rrggbb" hex color into a 24-bit ANSI SGR foreground-color escape sequence.
+ * Returns an empty string (no color override) for anything that doesn't parse as one. */
+function ansiTruecolor(hex: string): string {
+  const match = /^#?([0-9a-fA-F]{6})$/.exec(hex);
+  if (!match) {
+    return '';
+  }
+  const value = parseInt(match[1], 16);
+  const r = (value >> 16) & 0xff;
+  const g = (value >> 8) & 0xff;
+  const b = value & 0xff;
+  return `\x1b[38;2;${r};${g};${b}m`;
 }
 
 async function sendLine(

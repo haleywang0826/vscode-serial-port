@@ -2,15 +2,20 @@ import * as vscode from 'vscode';
 import { SerialPort } from 'serialport';
 import { ConnectionManager, DEFAULT_PORT_CONFIG, PortConfig } from '../serial/connectionManager';
 import { asciiStringToBytes, hexStringToBytes } from '../serial/format';
-import { createSerialTerminal, SerialTerminal } from '../serial/pseudoterminal';
+import { createSerialTerminal, SerialTerminal, TerminalColors } from '../serial/pseudoterminal';
 import { SendFormat, TemplateStore } from '../templates/templateStore';
 
 const REFRESH_DEBOUNCE_MS = 150;
 const LOG_FOLDER_KEY = 'serialPort.logFolder';
+const TX_COLOR_KEY = 'serialPort.txColor';
+const RX_COLOR_KEY = 'serialPort.rxColor';
+const DEFAULT_TX_COLOR = '#00cccc';
+const DEFAULT_RX_COLOR = '#33cc33';
 
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
 type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp';
 type DefaultCheckbox = 'hexSend' | 'hexRecv';
+type TerminalColorKey = 'tx' | 'rx';
 
 type ClientMessage =
   | { type: 'ready' }
@@ -21,6 +26,7 @@ type ClientMessage =
   | { type: 'removeSession'; path: string }
   | { type: 'updateDefaultSetting'; field: SettingField; value: string }
   | { type: 'updateDefaultCheckbox'; checkbox: DefaultCheckbox; value: boolean }
+  | { type: 'updateTerminalColor'; which: TerminalColorKey; value: string }
   | { type: 'updateSessionBaudRate'; path: string; baudRate: number }
   | { type: 'setCheckbox'; path: string; checkbox: SessionCheckbox; value: boolean }
   | { type: 'addTemplate'; name: string; format: SendFormat; data: string }
@@ -60,6 +66,8 @@ interface PanelState {
   defaultConfig: PortConfig;
   defaultHexSend: boolean;
   defaultHexRecv: boolean;
+  txColor: string;
+  rxColor: string;
   logFolder: string;
   logFolderIsCustom: boolean;
   sessions: PanelSession[];
@@ -77,6 +85,9 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
   private defaultConfig: PortConfig = { ...DEFAULT_PORT_CONFIG };
   private defaultHexSend = false;
   private defaultHexRecv = false;
+  /** User-configurable TX/RX terminal colors, passed by reference into every open terminal so a
+   * change here is visible live without reopening the port — see `TerminalColors`. */
+  private readonly terminalColors: TerminalColors = { tx: DEFAULT_TX_COLOR, rx: DEFAULT_RX_COLOR };
   private logFolderUri: vscode.Uri | undefined;
   private ports: { path: string; description: string }[] = [];
   /** Paths ever added via the "+" button, in add-order. A session card renders for every entry
@@ -102,6 +113,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     if (storedLogFolder) {
       this.logFolderUri = vscode.Uri.parse(storedLogFolder);
     }
+    this.terminalColors.tx = globalState.get<string>(TX_COLOR_KEY) ?? DEFAULT_TX_COLOR;
+    this.terminalColors.rx = globalState.get<string>(RX_COLOR_KEY) ?? DEFAULT_RX_COLOR;
   }
 
   dispose(): void {
@@ -162,6 +175,11 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         } else {
           this.defaultHexRecv = message.value;
         }
+        this.postState();
+        break;
+      case 'updateTerminalColor':
+        this.terminalColors[message.which] = message.value;
+        void this.globalState.update(message.which === 'tx' ? TX_COLOR_KEY : RX_COLOR_KEY, message.value);
         this.postState();
         break;
       case 'updateSessionBaudRate':
@@ -263,7 +281,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         });
       });
       this.closedMeta.delete(path);
-      const terminal = createSerialTerminal(connection);
+      const terminal = createSerialTerminal(connection, this.terminalColors);
       this.terminals.set(path, terminal);
       terminal.terminal.show(false);
     } catch (err) {
@@ -394,6 +412,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       defaultConfig: this.defaultConfig,
       defaultHexSend: this.defaultHexSend,
       defaultHexRecv: this.defaultHexRecv,
+      txColor: this.terminalColors.tx,
+      rxColor: this.terminalColors.rx,
       logFolder: this.resolveLogFolderUri().fsPath,
       logFolderIsCustom: this.logFolderUri !== undefined,
       sessions: this.sessionOrder.map((path) => {

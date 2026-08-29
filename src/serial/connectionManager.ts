@@ -33,6 +33,20 @@ export interface TrafficEvent {
 
 const LOG_FLUSH_DEBOUNCE_MS = 300;
 
+/** ISO-8601 formatted in the system's local timezone with its offset (unlike
+ * `Date.prototype.toISOString()`, which always renders UTC), e.g. "2026-08-29T14:23:01.123+08:00". */
+function toLocalIsoString(date: Date): string {
+  const pad = (value: number, width = 2) => String(value).padStart(width, '0');
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absMinutes = Math.abs(offsetMinutes);
+  const offset = `${sign}${pad(Math.floor(absMinutes / 60))}:${pad(absMinutes % 60)}`;
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}${offset}`
+  );
+}
+
 /** Live handle to one open serial port: I/O, config, format toggles, counters, and optional recording. */
 export class PortConnection {
   readonly path: string;
@@ -103,7 +117,7 @@ export class PortConnection {
           reject(err instanceof Error ? err : new Error(String(err)));
           return;
         }
-        const timestamp = new Date().toISOString();
+        const timestamp = toLocalIsoString(new Date());
         this.stats.bytesSent += bytes.length;
         this.appendLog('TX', bytes, timestamp);
         this.onDidTrafficEmitter.fire({ direction: 'TX', bytes, timestamp });
@@ -178,7 +192,7 @@ export class PortConnection {
 
   private handleIncoming(chunk: Buffer): void {
     const bytes = new Uint8Array(chunk);
-    const timestamp = new Date().toISOString();
+    const timestamp = toLocalIsoString(new Date());
     this.stats.bytesReceived += bytes.length;
     this.appendLog('RX', bytes, timestamp);
     this.onDidTrafficEmitter.fire({ direction: 'RX', bytes, timestamp });
@@ -278,6 +292,6 @@ export class ConnectionManager {
 
 function buildLogFileName(portPath: string): string {
   const sanitizedPath = portPath.replace(/[\\/:*?"<>|]/g, '_');
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const timestamp = toLocalIsoString(new Date()).replace(/[:.]/g, '-');
   return `${sanitizedPath}_${timestamp}.log`;
 }
