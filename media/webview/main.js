@@ -30,6 +30,8 @@
     editingTemplateId: null,
     editTemplateDraft: { name: '', format: 'hex', data: '' },
     customBaud: {},
+    portCollapsed: false,
+    sessionsCollapsed: false,
     defaultSettingsCollapsed: true,
     collapsedSessions: new Set(),
     templatesCollapsed: true,
@@ -125,12 +127,19 @@
             .join('');
     return `
       <section class="panel-section">
-        <h3>Port</h3>
-        <div class="row">
-          <select id="port-select">${options}</select>
-          <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to sessions">+</button>
-          <button class="icon-button" data-action="refresh-ports" title="Refresh port list">&#8635;</button>
+        <div class="section-header collapsible-header" data-action="toggle-port-section">
+          <h3>${ui.portCollapsed ? '▸' : '▾'} Port</h3>
         </div>
+        ${
+          ui.portCollapsed
+            ? ''
+            : `
+              <div class="row">
+                <select id="port-select">${options}</select>
+                <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to sessions">+</button>
+                <button class="icon-button" data-action="refresh-ports" title="Refresh port list">&#8635;</button>
+              </div>`
+        }
       </section>`;
   }
 
@@ -139,10 +148,10 @@
     const collapsed = ui.collapsedSessions.has(session.path);
     const chevron = collapsed ? '▸' : '▾';
     const statusBadge = session.connected ? '' : '<span class="status-closed">closed</span>';
-    const children = collapsed
+    const body = collapsed
       ? ''
       : `
-        <div class="tree-children">
+        <div class="session-body">
           ${renderConfigControls(prefix, session.config, true, !session.connected)}
           <div class="row checkboxes">
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
@@ -164,27 +173,30 @@
       ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close port">&#9632;</button>`
       : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open port">&#9658;</button>`;
     return `
-      <div class="tree-node">
-        <div class="tree-item collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
-          <span class="tree-twisty">${chevron}</span>
-          <span class="truncate">${escapeHtml(session.path)}</span>${statusBadge}
+      <div class="session-card">
+        <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
+          <strong>${chevron} ${escapeHtml(session.path)}</strong>${statusBadge}
           <div class="row session-actions">
             ${toggleButton}
-            <button class="icon-button" data-action="remove-session" data-path="${escapeHtml(session.path)}" title="Remove">&#10005;</button>
+            <button class="icon-button" data-action="remove-session" data-path="${escapeHtml(session.path)}" title="Remove">&#10006;</button>
           </div>
         </div>
-        ${children}
+        ${body}
       </div>`;
   }
 
   function renderSessions() {
-    const body =
-      lastState.sessions.length === 0
+    const chevron = ui.sessionsCollapsed ? '▸' : '▾';
+    const body = ui.sessionsCollapsed
+      ? ''
+      : lastState.sessions.length === 0
         ? '<p class="muted">No ports added.</p>'
         : lastState.sessions.map(renderSession).join('');
     return `
       <section class="panel-section">
-        <h3>Sessions</h3>
+        <div class="section-header collapsible-header" data-action="toggle-sessions-section">
+          <h3>${chevron} Sessions</h3>
+        </div>
         ${body}
       </section>`;
   }
@@ -424,6 +436,14 @@
         break;
       case 'toggle-default-settings':
         ui.defaultSettingsCollapsed = !ui.defaultSettingsCollapsed;
+        render();
+        break;
+      case 'toggle-port-section':
+        ui.portCollapsed = !ui.portCollapsed;
+        render();
+        break;
+      case 'toggle-sessions-section':
+        ui.sessionsCollapsed = !ui.sessionsCollapsed;
         render();
         break;
       case 'toggle-session': {

@@ -134,14 +134,18 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   restored on reopen. `buildState()` builds each `PanelSession` (with a
   `connected: boolean` flag) from the live `PortConnection` when open, or
   from `closedMeta` (falling back to the defaults) when not. `main.js`
-  renders each session as a flat, indented tree row (chevron + path,
-  matching VS Code's File Explorer look, not a bordered card) with an
-  open/close toggle button (`togglePort`) plus a separate remove button
+  renders each session as its own bordered `.session-card` (chevron + path
+  in a `.session-header`, expanding into a `.session-body` underneath) with
+  an open/close toggle button (`togglePort`) plus a separate remove button
   (`removeSession`) that drops it from `sessionOrder`/`closedMeta` for
-  good; expanding a row indents its config/checkboxes/log-line/stats
-  underneath, set off by a `.tree-children` left border matching the
-  Explorer's indent guide. The port picker itself is just a `<select>`
-  plus a "+" icon button (`addPort`) that adds the selected path to
+  good. All four top-level sections — Port, Sessions, Send Templates,
+  Default Settings — share one `.section-header.collapsible-header`
+  pattern (chevron + uppercase title, click anywhere on the header to
+  fold), the same explorer-panel convention VS Code's own Explorer view
+  uses for its top-level groups (OPEN EDITORS, workspace folders, etc.);
+  Port and Sessions default expanded, Send Templates and Default Settings
+  default collapsed. The port picker itself is just a `<select>` plus a
+  "+" icon button (`addPort`) that adds the selected path to
   `sessionOrder` and opens it. `media/webview/main.js` is vanilla
   JS with no framework or bundler — it does a full DOM re-render from that
   state on every message and posts action messages back
@@ -150,10 +154,16 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   `updateSessionBaudRate`, `setCheckbox`, `addTemplate`, `updateTemplate`,
   `deleteTemplate`, `sendTemplate`, `browseLogFolder`, `clearLogFolder`,
   `openLogFile`); it
-  keeps in-progress form edits and fold state (Default Settings and Send
-  Templates both default to collapsed) in local JS state (not the pushed
-  state) so an unrelated push (e.g. another port's byte counter) can't
-  clobber them.
+  keeps in-progress form edits and fold state (each of the four
+  section-level folds, plus each session card's own fold, tracked
+  independently) in local JS state (not the pushed state) so an unrelated
+  push (e.g. another port's byte counter) can't clobber them. Every
+  `.icon-button` is sized in `border-box` (see the global `box-sizing:
+  border-box` reset in `style.css`) so a button that also carries a border
+  (e.g. the "closed" toggle state) stays exactly 22×22 like its
+  border-less siblings — otherwise the extra border width would inflate
+  that button's box and throw off the flex-centered icon glyph relative to
+  the row it sits in.
 - `templates/templateStore.ts` — CRUD for send templates over
   `context.globalState` (global, not workspace-scoped).
 

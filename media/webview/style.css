@@ -7,6 +7,12 @@ body {
   font-size: var(--vscode-font-size);
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 h3 {
   margin: 0 0 6px;
   font-size: 11px;
@@ -129,33 +135,22 @@ button:disabled {
   gap: 4px;
 }
 
-.tree-node {
-  margin-bottom: 0;
+.session-card {
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-radius: 3px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
 }
 
-.tree-item {
+.session-header {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 4px;
-  border-radius: 2px;
+  justify-content: space-between;
+  word-break: break-all;
 }
 
-.tree-item:hover {
-  background-color: var(--vscode-list-hoverBackground);
-}
-
-.tree-twisty {
-  flex: none;
-  width: 12px;
-  text-align: center;
-  opacity: 0.75;
-}
-
-.tree-children {
-  margin: 2px 0 4px 22px;
-  padding-left: 8px;
-  border-left: 1px solid var(--vscode-tree-indentGuidesStroke, var(--vscode-widget-border, var(--vscode-panel-border)));
+.session-body {
+  margin-top: 6px;
 }
 
 .session-actions {
@@ -177,6 +172,7 @@ button:disabled {
   text-transform: uppercase;
   font-size: 10px;
   letter-spacing: 0.04em;
+  margin-left: 6px;
 }
 
 .stats {
