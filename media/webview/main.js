@@ -109,8 +109,8 @@
     return `
       <div class="row">
         <span class="muted truncate" title="${escapeHtml(folder ?? '')}">${escapeHtml(label ?? '')}</span>
-        <button data-action="browse-log-folder">Change…</button>
-        ${lastState.logFolderIsCustom ? '<button data-action="clear-log-folder">Clear</button>' : ''}
+        ${lastState.logFolderIsCustom ? '<button class="icon-button" data-action="clear-log-folder" title="Reset to default log folder">&#10006;</button>' : ''}
+        <button class="icon-button" data-action="browse-log-folder" title="Change log folder">&#8230;</button>
       </div>`;
   }
 
