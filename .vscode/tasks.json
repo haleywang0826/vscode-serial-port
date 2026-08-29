@@ -6,7 +6,7 @@
       "script": "watch",
       "label": "npm: watch",
       "isBackground": true,
-      "problemMatcher": [],
+      "problemMatcher": "$esbuild-watch",
       "presentation": { "reveal": "never" },
       "group": { "kind": "build", "isDefault": true }
     },

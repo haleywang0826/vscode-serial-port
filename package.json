@@ -34,6 +34,31 @@
         "command": "serialPort.helloWorld",
         "title": "Serial Port: Hello World"
       }
+    ],
+    "problemMatchers": [
+      {
+        "name": "esbuild-watch",
+        "source": "esbuild",
+        "owner": "esbuild",
+        "fileLocation": "relative",
+        "pattern": [
+          {
+            "regexp": "^✘ \\[ERROR\\] (.+)$",
+            "message": 1
+          },
+          {
+            "regexp": "^\\s+(.+):(\\d+):(\\d+):$",
+            "file": 1,
+            "line": 2,
+            "column": 3
+          }
+        ],
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\[watch\\] build started$",
+          "endsPattern": "^\\[watch\\] build finished$"
+        }
+      }
     ]
   },
   "scripts": {
