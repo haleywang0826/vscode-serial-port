@@ -195,8 +195,6 @@ button:disabled {
   color: var(--vscode-icon-foreground, var(--vscode-foreground));
   border: none;
   border-radius: 5px;
-  font-size: 16px;
-  font-weight: 600;
 }
 
 .icon-button:hover:not(:disabled) {

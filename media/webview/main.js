@@ -144,8 +144,8 @@
     return `
       <div class="row">
         <span class="muted truncate" title="${escapeHtml(folder ?? '')}">${escapeHtml(label ?? '')}</span>
-        ${lastState.logFolderIsCustom ? '<button class="icon-button" data-action="clear-log-folder" title="Reset to Default Log Folder">&#10006;</button>' : ''}
-        <button class="icon-button" data-action="browse-log-folder" title="Change Log Folder">&#8230;</button>
+        ${lastState.logFolderIsCustom ? '<button class="icon-button" data-action="clear-log-folder" title="Reset to Default Log Folder"><i class="codicon codicon-discard"></i></button>' : ''}
+        <button class="icon-button" data-action="browse-log-folder" title="Change Log Folder"><i class="codicon codicon-folder-opened"></i></button>
       </div>`;
   }
 
@@ -201,15 +201,15 @@
             session.logFilePath
               ? `<div class="log-line muted">
                   <span class="truncate" title="${escapeHtml(session.logFilePath)}">${escapeHtml(session.logFilePath)}</span>
-                  <button class="icon-button" data-action="open-log-file" data-path="${escapeHtml(session.logFilePath)}" title="Open Log File">&#8599;</button>
+                  <button class="icon-button" data-action="open-log-file" data-path="${escapeHtml(session.logFilePath)}" title="Open Log File"><i class="codicon codicon-link-external"></i></button>
                 </div>`
               : ''
           }
           <div class="stats muted">TX: ${session.stats.bytesSent} bytes &nbsp; RX: ${session.stats.bytesReceived} bytes</div>
         </div>`;
     const toggleButton = session.connected
-      ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close Port">&#11200;</button>`
-      : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open Port">&#11208;</button>`;
+      ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close Port"><i class="codicon codicon-debug-stop"></i></button>`
+      : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open Port"><i class="codicon codicon-debug-start"></i></button>`;
     return `
       <div class="session-card">
         <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
@@ -219,7 +219,7 @@
           </div>
           <div class="row session-actions">
             ${toggleButton}
-            <button class="icon-button" data-action="remove-session" data-path="${escapeHtml(session.path)}" title="Remove">&#10006;</button>
+            <button class="icon-button" data-action="remove-session" data-path="${escapeHtml(session.path)}" title="Remove"><i class="codicon codicon-close"></i></button>
           </div>
         </div>
         ${body}
@@ -300,9 +300,9 @@
         <div class="template-row-sub">
           <span class="muted truncate">${escapeHtml(template.data)}</span>
           <div class="row template-actions">
-            <button class="icon-button" data-action="send-template" data-id="${template.id}" ${sendDisabled} title="Send">&#10148;</button>
-            <button class="icon-button" data-action="edit-template-toggle" data-id="${template.id}" title="Edit">&#9998;</button>
-            <button class="icon-button" data-action="delete-template" data-id="${template.id}" title="Delete">&#128465;&#65038;</button>
+            <button class="icon-button" data-action="send-template" data-id="${template.id}" ${sendDisabled} title="Send"><i class="codicon codicon-send"></i></button>
+            <button class="icon-button" data-action="edit-template-toggle" data-id="${template.id}" title="Edit"><i class="codicon codicon-edit"></i></button>
+            <button class="icon-button" data-action="delete-template" data-id="${template.id}" title="Delete"><i class="codicon codicon-trash"></i></button>
           </div>
         </div>
       </div>`;
@@ -323,7 +323,7 @@
         <div class="section-header collapsible-header" data-action="toggle-templates">
           <span class="twisty ${ui.templatesCollapsed ? '' : 'expanded'}"></span>
           <h3>Send Templates</h3>
-          <button class="icon-button" data-action="add-template-toggle" title="Add Template">+</button>
+          <button class="icon-button" data-action="add-template-toggle" title="Add Template"><i class="codicon codicon-add"></i></button>
         </div>
         ${body}
       </section>`;

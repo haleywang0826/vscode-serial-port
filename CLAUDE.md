@@ -173,29 +173,33 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   own toolbar icons (e.g. the Search view's refresh/filter icons) —
   transparent by default, with a `--vscode-toolbar-hoverBackground` tint
   on hover — rather than a filled `--vscode-button-background` pill, which
-  is reserved for real primary actions (Send Templates' Save/Cancel). The
-  add-port (`+`) and refresh-ports buttons render the actual VS Code
-  Codicon glyphs (`codicon-add`/`codicon-refresh`, `<i class="codicon
-  codicon-*">`) rather than a hand-picked Unicode character — Unicode
-  glyphs (`+`, `↻`, etc.) render thinner/smaller and inconsistently across
-  platforms even at the same declared `font-size`, so they never visually
-  matched another extension's native-toolbar-style buttons; codicon is the
-  exact font VS Code's own UI uses, guaranteeing pixel/weight parity. The
-  font is bundled by copying `node_modules/@vscode/codicons/dist/{codicon.css,codicon.ttf}`
-  into `media/webview/` at dev time (not referenced from `node_modules` at
+  is reserved for real primary actions (Send Templates' Save/Cancel). Every
+  icon button in the panel renders a real VS Code Codicon glyph
+  (`<i class="codicon codicon-*">` — `add`, `refresh`, `debug-start`/
+  `debug-stop` for the open/close toggle, `close` for remove-session,
+  `discard` for reset-log-folder, `folder-opened` for browse-log-folder,
+  `link-external` for open-log-file, `send`/`edit`/`trash` for the template
+  row actions) rather than a hand-picked Unicode character — Unicode
+  glyphs (`+`, `↻`, `✎`, etc.) render thinner/smaller and inconsistently
+  across platforms even at the same declared `font-size`, so they never
+  visually matched another extension's native-toolbar-style buttons;
+  codicon is the exact font VS Code's own UI uses, guaranteeing
+  pixel/weight parity. The font is bundled by copying
+  `node_modules/@vscode/codicons/dist/{codicon.css,codicon.ttf}` into
+  `media/webview/` at dev time (not referenced from `node_modules` at
   runtime, so no `.vscodeignore` carve-out like `serialport`'s is needed —
   everything the webview loads already lives inside the shipped
   `media/webview/` directory) and linked from `getHtml()` alongside
   `style.css`; the webview CSP's `font-src` directive was added
-  specifically to allow it to load. Other icon buttons not yet migrated to
-  codicon (toggle/remove/change-folder/template actions) still render a
-  literal Unicode glyph sized via the button's own `font-size: 16px`. Every
-  `.icon-button` is sized in `border-box` (see the global `box-sizing:
-  border-box` reset in `style.css`) so a button that also carries a border
-  (e.g. the "closed" toggle state) stays exactly 22×22 like its
-  border-less siblings — otherwise the extra border width would inflate
-  that button's box and throw off the flex-centered icon glyph relative to
-  the row it sits in.
+  specifically to allow it to load. Since every `.icon-button` now only
+  ever wraps a codicon `<i>` (each already sized/weighted by its own
+  `.codicon` font-face rule), the button itself carries no `font-size`/
+  `font-weight` of its own. Every `.icon-button` is sized in `border-box`
+  (see the global `box-sizing: border-box` reset in `style.css`) so a
+  button that also carries a border (e.g. the "closed" toggle state)
+  stays exactly 22×22 like its border-less siblings — otherwise the extra
+  border width would inflate that button's box and throw off the
+  flex-centered icon glyph relative to the row it sits in.
   Port and Sessions default expanded, Send Templates and Default Settings
   default collapsed. The port picker itself is just a `<select>` plus an
   add-port icon button (`addPort`) that adds the selected path to
