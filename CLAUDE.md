@@ -65,14 +65,22 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
 
 **Module layout** (`src/`):
 - `serial/connectionManager.ts` — `PortConnection` (one open port: I/O,
-  live baud-rate update, byte counters, hex/ascii + recording toggles, an
-  `OutputChannel`-backed log) and `ConnectionManager` (the open-ports
-  registry, keyed by device path).
+  live baud-rate update, byte counters, hex/ascii + recording toggles, and
+  file-based logging while recording) and `ConnectionManager` (the
+  open-ports registry, keyed by device path).
 - `serial/format.ts` — hex↔bytes conversion and the hex-mode keystroke
   filter, shared by the tree's stats display and the terminal.
 - `serial/pseudoterminal.ts` — the interactive per-port terminal: a
   `vscode.Pseudoterminal` that echoes/buffers typed input itself (ptys don't
-  echo), rejects non-hex keystrokes while hex-send is on, and sends on Enter.
+  echo), rejects non-hex keystrokes while hex-send is on, and sends on
+  Enter. The input line is pinned to the terminal's actual bottom row via an
+  ANSI scroll region (DECSTBM, `\x1b[<top>;<bottom>r`) confined to rows
+  `1..rows-1` — the same mechanism `tmux`'s status line and `htop`'s header
+  use. Redrawing the prompt after each write (the original approach) only
+  places it just after the last printed line, leaving blank rows below it
+  until the screen fills; a real scroll region is what keeps the last row
+  pinned to the bottom of the viewport from the start, with incoming/echoed
+  text scrolling independently above it.
 - `webview/serialPanelProvider.ts` + `media/webview/{main.js, style.css}` —
   the Activity Bar view is a `vscode.WebviewViewProvider`, not a
   `TreeDataProvider`. It was a tree view originally, but `TreeItem` can't
@@ -81,33 +89,37 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   both were hard requirements, so the presentation layer moved to a webview
   where a real `<select>` and `<button>` do both for free.
   `serialPanelProvider.ts` builds the nonce/CSP-gated HTML, serializes all
-  panel state (ports, selected port, default config, log folder, open
-  sessions, templates) via `buildState()`, and pushes it to the webview as
-  `{type: 'state', state}` on resolve, on visibility change, on an explicit
-  `refreshPorts` message, and (debounced 150ms) whenever
+  panel state (ports, selected port, default config, resolved log folder,
+  open sessions, templates) via `buildState()`, and pushes it to the webview
+  as `{type: 'state', state}` on resolve, on visibility change, on an
+  explicit `refreshPorts` message, and (debounced 150ms) whenever
   `ConnectionManager.onDidChange` fires. `media/webview/main.js` is vanilla
   JS with no framework or bundler — it does a full DOM re-render from that
   state on every message and posts action messages back
   (`selectPort`, `openPort`, `closePort`, `refreshPorts`,
   `updateDefaultSetting`, `updateSessionBaudRate`, `setCheckbox`,
   `addTemplate`, `updateTemplate`, `deleteTemplate`, `sendTemplate`,
-  `browseLogFolder`, `clearLogFolder`); it keeps in-progress form edits in
-  local JS state (not the pushed state) so an unrelated push (e.g. another
-  port's byte counter) can't clobber them.
+  `browseLogFolder`, `clearLogFolder`, `openLogFile`); it keeps in-progress
+  form edits in local JS state (not the pushed state) so an unrelated push
+  (e.g. another port's byte counter) can't clobber them.
 - `templates/templateStore.ts` — CRUD for send templates over
   `context.globalState` (global, not workspace-scoped).
 
-Recording a session's traffic always writes to a `vscode.OutputChannel` —
-live, timestamped, TX/RX-marked, no save prompt, and no need to hand-roll
-incremental re-rendering of a virtual document via a custom
-`TextDocumentContentProvider`. If the user has also set a default "Log
-Folder" (a `context.globalState`-persisted Uri, browsed via
-`vscode.window.showOpenDialog`), turning Record on *additionally* writes the
-same lines to an auto-named file in that folder (`<port>_<ISO
-timestamp>.log`) via debounced `vscode.workspace.fs.writeFile` calls in
-`PortConnection` — never raw Node `fs`, to preserve the WSL-transparency
-property described above. With no Log Folder configured, Record behaves
-exactly as before: OutputChannel only, nothing persisted to disk.
+Recording a session's traffic writes to an auto-named log file
+(`<port>_<ISO timestamp>.log`, one full ISO-8601 date-time per line) via
+debounced `vscode.workspace.fs.writeFile` calls in `PortConnection` — never
+raw Node `fs`, to preserve the WSL-transparency property described above.
+There's no `OutputChannel` view for this anymore: the terminal already
+shows the same live TX/RX traffic, so a second live view would be
+redundant. The destination folder defaults to `<workspace root>/serial
+logs` (auto-created via `vscode.workspace.fs.createDirectory`), falling
+back to the extension's `context.globalStorageUri` when no workspace
+folder is open; a custom "Log Folder" override (persisted in
+`context.globalState`, browsed via `vscode.window.showOpenDialog`) takes
+priority over that default when set. Turning Record off flushes and keeps
+the file path around (rather than clearing it) so the panel can still show
+and open the completed log — each session card has an icon button that
+opens its current log file via `vscode.window.showTextDocument`.
 
 ## Publishing
 
@@ -140,3 +152,9 @@ lifecycle-script cases.
 and for `npm install`, use `--ignore-scripts` then manually run the
 individual package's install script the same way (e.g.
 `node node_modules/esbuild/install.js`) if a dependency needs one.
+
+This generalizes beyond Node: any native executable in this sandbox (e.g.
+`git.exe`) silently produces no captured output via plain invocation or
+even PowerShell variable capture (`$out = & ...`) — the `Start-Process
+-RedirectStandardOutput/-RedirectStandardError` pattern above is required
+for all of them, not just Node/npm.

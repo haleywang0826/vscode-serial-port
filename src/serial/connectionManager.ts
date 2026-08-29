@@ -35,7 +35,6 @@ export class PortConnection {
   readonly stats: PortStats = { bytesSent: 0, bytesReceived: 0 };
 
   private readonly port: SerialPort;
-  private outputChannel: vscode.OutputChannel | undefined;
   private logFileUri: vscode.Uri | undefined;
   private logBuffer = '';
   private logFlushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -128,15 +127,15 @@ export class PortConnection {
 
   setRecording(value: boolean, logFolderUri?: vscode.Uri): void {
     this.recording = value;
-    if (value) {
-      this.getOutputChannel().show(true);
-      if (logFolderUri) {
-        this.logFileUri = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
-        this.logBuffer = '';
-      }
-    } else {
+    if (value && logFolderUri) {
+      void vscode.workspace.fs.createDirectory(logFolderUri).then(undefined, (err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`Failed to create log folder: ${message}`);
+      });
+      this.logFileUri = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
+      this.logBuffer = '';
+    } else if (!value) {
       this.flushLogFile();
-      this.logFileUri = undefined;
     }
     this.onDidUpdateEmitter.fire();
   }
@@ -154,7 +153,6 @@ export class PortConnection {
     if (this.logFlushTimer) {
       clearTimeout(this.logFlushTimer);
     }
-    this.outputChannel?.dispose();
     this.onDidReceiveDataEmitter.dispose();
     this.onDidCloseEmitter.dispose();
     this.onDidUpdateEmitter.dispose();
@@ -172,10 +170,9 @@ export class PortConnection {
     if (!this.recording) {
       return;
     }
-    const timestamp = new Date().toISOString().slice(11, 23);
+    const timestamp = new Date().toISOString();
     const formatted = formatBytes(bytes, direction === 'TX' ? this.hexSend : this.hexRecv);
     const line = `[${timestamp}] ${direction}: ${formatted}`;
-    this.getOutputChannel().appendLine(line);
     if (this.logFileUri) {
       this.logBuffer += line + '\n';
       this.scheduleLogFlush();
@@ -204,13 +201,6 @@ export class PortConnection {
         const message = err instanceof Error ? err.message : String(err);
         vscode.window.showErrorMessage(`Failed to write serial log file: ${message}`);
       });
-  }
-
-  private getOutputChannel(): vscode.OutputChannel {
-    if (!this.outputChannel) {
-      this.outputChannel = vscode.window.createOutputChannel(`Serial: ${this.path}`);
-    }
-    return this.outputChannel;
   }
 }
 

@@ -25,7 +25,8 @@ type ClientMessage =
   | { type: 'deleteTemplate'; id: string }
   | { type: 'sendTemplate'; id: string; path?: string }
   | { type: 'browseLogFolder' }
-  | { type: 'clearLogFolder' };
+  | { type: 'clearLogFolder' }
+  | { type: 'openLogFile'; path: string };
 
 interface PanelSession {
   path: string;
@@ -41,7 +42,8 @@ interface PanelState {
   ports: { path: string; description: string }[];
   selectedPort: string | undefined;
   defaultConfig: PortConfig;
-  logFolder: string | undefined;
+  logFolder: string;
+  logFolderIsCustom: boolean;
   sessions: PanelSession[];
   templates: ReturnType<TemplateStore['list']>;
 }
@@ -66,6 +68,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     private readonly templates: TemplateStore,
     private readonly terminals: Map<string, SerialTerminal>,
     private readonly globalState: vscode.Memento,
+    private readonly defaultStorageUri: vscode.Uri,
   ) {
     this.subscriptions.push(connections.onDidChange(() => this.scheduleStateRefresh()));
     this.subscriptions.push(connections.onDidChange(() => this.pruneClosedTerminals()));
@@ -154,6 +157,9 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         void this.globalState.update(LOG_FOLDER_KEY, undefined);
         this.postState();
         break;
+      case 'openLogFile':
+        void vscode.window.showTextDocument(vscode.Uri.file(message.path));
+        break;
     }
   }
 
@@ -211,6 +217,14 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     this.postState();
   }
 
+  private resolveLogFolderUri(): vscode.Uri {
+    if (this.logFolderUri) {
+      return this.logFolderUri;
+    }
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.defaultStorageUri;
+    return vscode.Uri.joinPath(workspaceRoot, 'serial logs');
+  }
+
   private setCheckbox(path: string, checkbox: SessionCheckbox, value: boolean): void {
     const connection = this.connections.get(path);
     if (!connection) {
@@ -224,7 +238,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         connection.setHexRecv(value);
         break;
       case 'record':
-        connection.setRecording(value, this.logFolderUri);
+        connection.setRecording(value, this.resolveLogFolderUri());
         break;
     }
   }
@@ -286,7 +300,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       ports: this.ports,
       selectedPort: this.selectedPort,
       defaultConfig: this.defaultConfig,
-      logFolder: this.logFolderUri?.fsPath,
+      logFolder: this.resolveLogFolderUri().fsPath,
+      logFolderIsCustom: this.logFolderUri !== undefined,
       sessions: this.connections.list().map((connection) => ({
         path: connection.path,
         config: connection.config,

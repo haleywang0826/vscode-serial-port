@@ -12,6 +12,8 @@
     ports: [],
     selectedPort: undefined,
     defaultConfig: { baudRate: 9600, dataBits: 8, parity: 'none', stopBits: 1 },
+    logFolder: '',
+    logFolderIsCustom: false,
     sessions: [],
     templates: [],
   };
@@ -94,13 +96,12 @@
 
   function renderLogFolderRow() {
     const folder = lastState.logFolder;
+    const label = lastState.logFolderIsCustom ? folder : `Using: ${folder}`;
     return `
       <div class="row">
-        <span class="muted truncate" title="${escapeHtml(folder ?? '')}">${
-          folder ? escapeHtml(folder) : 'No log folder set — Record only shows in Output'
-        }</span>
-        <button data-action="browse-log-folder">${folder ? 'Change…' : 'Set Log Folder…'}</button>
-        ${folder ? '<button data-action="clear-log-folder">Clear</button>' : ''}
+        <span class="muted truncate" title="${escapeHtml(folder ?? '')}">${escapeHtml(label ?? '')}</span>
+        <button data-action="browse-log-folder">Change…</button>
+        ${lastState.logFolderIsCustom ? '<button data-action="clear-log-folder">Clear</button>' : ''}
       </div>`;
   }
 
@@ -148,8 +149,11 @@
           <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''}> Record</label>
         </div>
         ${
-          session.recording && session.logFilePath
-            ? `<div class="muted truncate" title="${escapeHtml(session.logFilePath)}">Logging to ${escapeHtml(session.logFilePath)}</div>`
+          session.logFilePath
+            ? `<div class="log-line muted truncate" title="${escapeHtml(session.logFilePath)}">
+                <span class="truncate">Logging to ${escapeHtml(session.logFilePath)}</span>
+                <button class="icon-button" data-action="open-log-file" data-path="${escapeHtml(session.logFilePath)}" title="Open log file">&#8599;</button>
+              </div>`
             : ''
         }
         <div class="stats muted">TX: ${session.stats.bytesSent} bytes &nbsp; RX: ${session.stats.bytesReceived} bytes</div>`;
@@ -355,6 +359,9 @@
         break;
       case 'clear-log-folder':
         postMessage({ type: 'clearLogFolder' });
+        break;
+      case 'open-log-file':
+        postMessage({ type: 'openLogFile', path: el.dataset.path });
         break;
       case 'toggle-default-settings':
         ui.defaultSettingsCollapsed = !ui.defaultSettingsCollapsed;
