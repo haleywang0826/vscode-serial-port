@@ -146,6 +146,7 @@
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Recv</label>
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''} ${session.connected ? '' : 'disabled title="Open the port to record"'}> Record to file</label>
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="showTimestamp" ${session.showTimestamp ? 'checked' : ''}> Show timestamp</label>
           </div>
           ${
             session.logFilePath

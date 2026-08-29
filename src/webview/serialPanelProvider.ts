@@ -9,7 +9,7 @@ const REFRESH_DEBOUNCE_MS = 150;
 const LOG_FOLDER_KEY = 'serialPort.logFolder';
 
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
-type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record';
+type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp';
 type DefaultCheckbox = 'hexSend' | 'hexRecv';
 
 type ClientMessage =
@@ -37,6 +37,7 @@ interface StoredSessionMeta {
   config: PortConfig;
   hexSend: boolean;
   hexRecv: boolean;
+  showTimestamp: boolean;
   logFilePath: string | undefined;
   stats: { bytesSent: number; bytesReceived: number };
 }
@@ -48,6 +49,7 @@ interface PanelSession {
   hexSend: boolean;
   hexRecv: boolean;
   recording: boolean;
+  showTimestamp: boolean;
   logFilePath: string | undefined;
   stats: { bytesSent: number; bytesReceived: number };
 }
@@ -249,11 +251,13 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       const connection = await this.connections.open(path, config);
       connection.setHexSend(meta?.hexSend ?? this.defaultHexSend);
       connection.setHexRecv(meta?.hexRecv ?? this.defaultHexRecv);
+      connection.setShowTimestamp(meta?.showTimestamp ?? false);
       connection.onDidClose(() => {
         this.closedMeta.set(path, {
           config: connection.config,
           hexSend: connection.hexSend,
           hexRecv: connection.hexRecv,
+          showTimestamp: connection.showTimestamp,
           logFilePath: connection.logFilePath,
           stats: { ...connection.stats },
         });
@@ -316,13 +320,16 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         case 'record':
           connection.setRecording(value, this.resolveLogFolderUri());
           break;
+        case 'showTimestamp':
+          connection.setShowTimestamp(value);
+          break;
       }
       return;
     }
     // No live connection: remember the setting on the closed session so a later reopen
     // picks it up. Recording only makes sense while connected, so it's ignored here.
     const meta = this.closedMeta.get(path);
-    if (meta && (checkbox === 'hexSend' || checkbox === 'hexRecv')) {
+    if (meta && (checkbox === 'hexSend' || checkbox === 'hexRecv' || checkbox === 'showTimestamp')) {
       meta[checkbox] = value;
       this.postState();
     }
@@ -399,6 +406,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
             hexSend: connection.hexSend,
             hexRecv: connection.hexRecv,
             recording: connection.recording,
+            showTimestamp: connection.showTimestamp,
             logFilePath: connection.logFilePath,
             stats: connection.stats,
           };
@@ -411,6 +419,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           hexSend: meta?.hexSend ?? this.defaultHexSend,
           hexRecv: meta?.hexRecv ?? this.defaultHexRecv,
           recording: false,
+          showTimestamp: meta?.showTimestamp ?? false,
           logFilePath: meta?.logFilePath,
           stats: meta?.stats ?? { bytesSent: 0, bytesReceived: 0 },
         };

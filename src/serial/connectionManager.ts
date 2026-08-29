@@ -23,6 +23,14 @@ export interface PortStats {
   bytesReceived: number;
 }
 
+/** One TX/RX event: raw bytes plus the single timestamp computed for it, shared by the file log
+ * and any live display so the two never disagree or compute it independently. */
+export interface TrafficEvent {
+  direction: 'TX' | 'RX';
+  bytes: Uint8Array;
+  timestamp: string;
+}
+
 const LOG_FLUSH_DEBOUNCE_MS = 300;
 
 /** Live handle to one open serial port: I/O, config, format toggles, counters, and optional recording. */
@@ -32,6 +40,7 @@ export class PortConnection {
   hexSend = false;
   hexRecv = false;
   recording = false;
+  showTimestamp = false;
   readonly stats: PortStats = { bytesSent: 0, bytesReceived: 0 };
 
   private readonly port: SerialPort;
@@ -40,8 +49,10 @@ export class PortConnection {
   private logFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private logFlushChain: Promise<void> = Promise.resolve();
 
-  private readonly onDidReceiveDataEmitter = new vscode.EventEmitter<Uint8Array>();
-  readonly onDidReceiveData = this.onDidReceiveDataEmitter.event;
+  private readonly onDidTrafficEmitter = new vscode.EventEmitter<TrafficEvent>();
+  /** Fires for every TX (typed or template-sent) and RX event, so any live view always sees
+   * everything that touches the wire, not just what it happened to write itself. */
+  readonly onDidTraffic = this.onDidTrafficEmitter.event;
 
   private readonly onDidCloseEmitter = new vscode.EventEmitter<void>();
   readonly onDidClose = this.onDidCloseEmitter.event;
@@ -92,8 +103,10 @@ export class PortConnection {
           reject(err instanceof Error ? err : new Error(String(err)));
           return;
         }
+        const timestamp = new Date().toISOString();
         this.stats.bytesSent += bytes.length;
-        this.appendLog('TX', bytes);
+        this.appendLog('TX', bytes, timestamp);
+        this.onDidTrafficEmitter.fire({ direction: 'TX', bytes, timestamp });
         this.onDidUpdateEmitter.fire();
         resolve();
       });
@@ -140,6 +153,11 @@ export class PortConnection {
     this.onDidUpdateEmitter.fire();
   }
 
+  setShowTimestamp(value: boolean): void {
+    this.showTimestamp = value;
+    this.onDidUpdateEmitter.fire();
+  }
+
   get isOpen(): boolean {
     return this.port.isOpen;
   }
@@ -153,24 +171,24 @@ export class PortConnection {
     if (this.logFlushTimer) {
       clearTimeout(this.logFlushTimer);
     }
-    this.onDidReceiveDataEmitter.dispose();
+    this.onDidTrafficEmitter.dispose();
     this.onDidCloseEmitter.dispose();
     this.onDidUpdateEmitter.dispose();
   }
 
   private handleIncoming(chunk: Buffer): void {
     const bytes = new Uint8Array(chunk);
+    const timestamp = new Date().toISOString();
     this.stats.bytesReceived += bytes.length;
-    this.appendLog('RX', bytes);
-    this.onDidReceiveDataEmitter.fire(bytes);
+    this.appendLog('RX', bytes, timestamp);
+    this.onDidTrafficEmitter.fire({ direction: 'RX', bytes, timestamp });
     this.onDidUpdateEmitter.fire();
   }
 
-  private appendLog(direction: 'TX' | 'RX', bytes: Uint8Array): void {
+  private appendLog(direction: 'TX' | 'RX', bytes: Uint8Array, timestamp: string): void {
     if (!this.recording) {
       return;
     }
-    const timestamp = new Date().toISOString();
     const formatted = formatBytes(bytes, direction === 'TX' ? this.hexSend : this.hexRecv);
     const line = `[${timestamp}] ${direction}: ${formatted}`;
     if (this.logFileUri) {

@@ -80,7 +80,16 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   places it just after the last printed line, leaving blank rows below it
   until the screen fills; a real scroll region is what keeps the last row
   pinned to the bottom of the viewport from the start, with incoming/echoed
-  text scrolling independently above it.
+  text scrolling independently above it. TX lines are rendered from
+  `PortConnection.onDidTraffic`, not echoed locally on Enter — this is what
+  makes every write show up here regardless of source (terminal-typed or a
+  Send Template), matching what the file log records. TX is cyan, RX is
+  green, and errors stay red (`\x1b[31m`, pre-existing); when a session's
+  "Show timestamp" checkbox is on, each line gets a dim `[ISO timestamp]
+  DIRECTION` prefix using the exact timestamp `onDidTraffic` carries — the
+  same value `appendLog` writes to the file, computed once per event so the
+  two can never disagree. The checkbox only gates the terminal prefix; the
+  file log always includes a timestamp regardless of it.
 - `webview/serialPanelProvider.ts` + `media/webview/{main.js, style.css}` —
   the Activity Bar view is a `vscode.WebviewViewProvider`, not a
   `TreeDataProvider`. It was a tree view originally, but `TreeItem` can't

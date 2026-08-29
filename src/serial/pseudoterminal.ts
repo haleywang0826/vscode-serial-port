@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { PortConnection } from './connectionManager';
+import { PortConnection, TrafficEvent } from './connectionManager';
 import { asciiStringToBytes, formatBytes, hexStringToBytes, isHexInputChar } from './format';
 
 const ENTER = '\r';
@@ -8,15 +8,24 @@ const CTRL_C = '\x03';
 
 const DEFAULT_ROWS = 24;
 
+const RESET = '\x1b[0m';
+const DIM = '\x1b[90m';
+const TX_COLOR = '\x1b[36m';
+const RX_COLOR = '\x1b[32m';
+const ERROR_COLOR = '\x1b[31m';
+
 export interface SerialTerminal {
   terminal: vscode.Terminal;
   dispose(): void;
 }
 
 /**
- * Creates an interactive terminal for one open port: renders incoming data live (formatted per
- * the connection's hex/ascii toggle) and sends whatever the user types on Enter. While "hex send"
- * is on, keystrokes that aren't hex digits/spaces are rejected as they're typed.
+ * Creates an interactive terminal for one open port: renders every TX/RX event live (colored by
+ * direction, formatted per the connection's hex/ascii toggles, optionally timestamped) and sends
+ * whatever the user types on Enter. TX is rendered from the connection's `onDidTraffic` event, the
+ * same source the file log reads from, so a template send (or any other write) shows up here too —
+ * not just terminal-typed input. While "hex send" is on, keystrokes that aren't hex digits/spaces
+ * are rejected as they're typed.
  *
  * The input line is pinned to the terminal's actual bottom row via an ANSI scroll region
  * (DECSTBM, `\x1b[<top>;<bottom>r`) confined to rows 1..rows-1 — the same mechanism tmux's status
@@ -44,9 +53,11 @@ export function createSerialTerminal(connection: PortConnection): SerialTerminal
     redrawInputLine();
   };
 
-  const dataSub = connection.onDidReceiveData((bytes) => {
-    printAboveInput(formatBytes(bytes, connection.hexRecv) + '\r\n');
+  const trafficSub = connection.onDidTraffic((event) => {
+    printAboveInput(formatTrafficLine(connection, event));
   });
+
+  const updateSub = connection.onDidUpdate(() => redrawInputLine());
 
   const connectionCloseSub = connection.onDidClose(() => closeEmitter.fire());
 
@@ -74,7 +85,7 @@ export function createSerialTerminal(connection: PortConnection): SerialTerminal
         if (ch === ENTER) {
           const sent = line;
           line = '';
-          printAboveInput(`${promptFor(connection)}${sent}\r\n`);
+          redrawInputLine();
           void sendLine(connection, sent, printAboveInput);
           continue;
         }
@@ -107,7 +118,8 @@ export function createSerialTerminal(connection: PortConnection): SerialTerminal
   return {
     terminal,
     dispose: () => {
-      dataSub.dispose();
+      trafficSub.dispose();
+      updateSub.dispose();
       connectionCloseSub.dispose();
       writeEmitter.dispose();
       closeEmitter.dispose();
@@ -118,6 +130,15 @@ export function createSerialTerminal(connection: PortConnection): SerialTerminal
 
 function promptFor(connection: PortConnection): string {
   return connection.hexSend ? 'hex> ' : '> ';
+}
+
+/** Renders one TX/RX event for the terminal: colored by direction, optionally prefixed with the
+ * shared timestamp from the event (the same value written to the file log, never recomputed). */
+function formatTrafficLine(connection: PortConnection, event: TrafficEvent): string {
+  const hex = event.direction === 'TX' ? connection.hexSend : connection.hexRecv;
+  const color = event.direction === 'TX' ? TX_COLOR : RX_COLOR;
+  const prefix = connection.showTimestamp ? `${DIM}[${event.timestamp}] ${event.direction}${RESET} ` : '';
+  return `${prefix}${color}${formatBytes(event.bytes, hex)}${RESET}\r\n`;
 }
 
 async function sendLine(
@@ -133,6 +154,6 @@ async function sendLine(
     await connection.write(bytes);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    printAboveInput(`\x1b[31m${message}\x1b[0m\r\n`);
+    printAboveInput(`${ERROR_COLOR}${message}${RESET}\r\n`);
   }
 }
