@@ -6,6 +6,7 @@ import { createSerialTerminal, SerialTerminal } from '../serial/pseudoterminal';
 import { SendFormat, TemplateStore } from '../templates/templateStore';
 
 const REFRESH_DEBOUNCE_MS = 150;
+const LOG_FOLDER_KEY = 'serialPort.logFolder';
 
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
 type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record';
@@ -22,7 +23,9 @@ type ClientMessage =
   | { type: 'addTemplate'; name: string; format: SendFormat; data: string }
   | { type: 'updateTemplate'; id: string; name: string; format: SendFormat; data: string }
   | { type: 'deleteTemplate'; id: string }
-  | { type: 'sendTemplate'; id: string; path?: string };
+  | { type: 'sendTemplate'; id: string; path?: string }
+  | { type: 'browseLogFolder' }
+  | { type: 'clearLogFolder' };
 
 interface PanelSession {
   path: string;
@@ -30,6 +33,7 @@ interface PanelSession {
   hexSend: boolean;
   hexRecv: boolean;
   recording: boolean;
+  logFilePath: string | undefined;
   stats: { bytesSent: number; bytesReceived: number };
 }
 
@@ -37,6 +41,7 @@ interface PanelState {
   ports: { path: string; description: string }[];
   selectedPort: string | undefined;
   defaultConfig: PortConfig;
+  logFolder: string | undefined;
   sessions: PanelSession[];
   templates: ReturnType<TemplateStore['list']>;
 }
@@ -50,6 +55,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
   private view: vscode.WebviewView | undefined;
   private selectedPort: string | undefined;
   private defaultConfig: PortConfig = { ...DEFAULT_PORT_CONFIG };
+  private logFolderUri: vscode.Uri | undefined;
   private ports: { path: string; description: string }[] = [];
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
@@ -59,9 +65,14 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     private readonly connections: ConnectionManager,
     private readonly templates: TemplateStore,
     private readonly terminals: Map<string, SerialTerminal>,
+    private readonly globalState: vscode.Memento,
   ) {
     this.subscriptions.push(connections.onDidChange(() => this.scheduleStateRefresh()));
     this.subscriptions.push(connections.onDidChange(() => this.pruneClosedTerminals()));
+    const storedLogFolder = globalState.get<string>(LOG_FOLDER_KEY);
+    if (storedLogFolder) {
+      this.logFolderUri = vscode.Uri.parse(storedLogFolder);
+    }
   }
 
   dispose(): void {
@@ -135,6 +146,14 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       case 'sendTemplate':
         void this.sendTemplate(message.id, message.path);
         break;
+      case 'browseLogFolder':
+        void this.browseLogFolder();
+        break;
+      case 'clearLogFolder':
+        this.logFolderUri = undefined;
+        void this.globalState.update(LOG_FOLDER_KEY, undefined);
+        this.postState();
+        break;
     }
   }
 
@@ -177,6 +196,21 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     }
   }
 
+  private async browseLogFolder(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFolders: true,
+      canSelectFiles: false,
+      canSelectMany: false,
+      openLabel: 'Select Log Folder',
+    });
+    if (!picked || picked.length === 0) {
+      return;
+    }
+    this.logFolderUri = picked[0];
+    await this.globalState.update(LOG_FOLDER_KEY, this.logFolderUri.toString());
+    this.postState();
+  }
+
   private setCheckbox(path: string, checkbox: SessionCheckbox, value: boolean): void {
     const connection = this.connections.get(path);
     if (!connection) {
@@ -190,7 +224,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         connection.setHexRecv(value);
         break;
       case 'record':
-        connection.setRecording(value);
+        connection.setRecording(value, this.logFolderUri);
         break;
     }
   }
@@ -252,12 +286,14 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       ports: this.ports,
       selectedPort: this.selectedPort,
       defaultConfig: this.defaultConfig,
+      logFolder: this.logFolderUri?.fsPath,
       sessions: this.connections.list().map((connection) => ({
         path: connection.path,
         config: connection.config,
         hexSend: connection.hexSend,
         hexRecv: connection.hexRecv,
         recording: connection.recording,
+        logFilePath: connection.logFilePath,
         stats: connection.stats,
       })),
       templates: this.templates.list(),

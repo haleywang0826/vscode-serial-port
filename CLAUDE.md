@@ -81,8 +81,8 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   both were hard requirements, so the presentation layer moved to a webview
   where a real `<select>` and `<button>` do both for free.
   `serialPanelProvider.ts` builds the nonce/CSP-gated HTML, serializes all
-  panel state (ports, selected port, default config, open sessions,
-  templates) via `buildState()`, and pushes it to the webview as
+  panel state (ports, selected port, default config, log folder, open
+  sessions, templates) via `buildState()`, and pushes it to the webview as
   `{type: 'state', state}` on resolve, on visibility change, on an explicit
   `refreshPorts` message, and (debounced 150ms) whenever
   `ConnectionManager.onDidChange` fires. `media/webview/main.js` is vanilla
@@ -90,16 +90,24 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   state on every message and posts action messages back
   (`selectPort`, `openPort`, `closePort`, `refreshPorts`,
   `updateDefaultSetting`, `updateSessionBaudRate`, `setCheckbox`,
-  `addTemplate`, `updateTemplate`, `deleteTemplate`, `sendTemplate`); it
-  keeps in-progress form edits in local JS state (not the pushed state) so
-  an unrelated push (e.g. another port's byte counter) can't clobber them.
+  `addTemplate`, `updateTemplate`, `deleteTemplate`, `sendTemplate`,
+  `browseLogFolder`, `clearLogFolder`); it keeps in-progress form edits in
+  local JS state (not the pushed state) so an unrelated push (e.g. another
+  port's byte counter) can't clobber them.
 - `templates/templateStore.ts` — CRUD for send templates over
   `context.globalState` (global, not workspace-scoped).
 
-Recording a session's traffic uses a `vscode.OutputChannel` rather than a
-file or a custom `TextDocumentContentProvider` — live, timestamped,
-TX/RX-marked, no save prompt, and no need to hand-roll incremental
-re-rendering of a virtual document.
+Recording a session's traffic always writes to a `vscode.OutputChannel` —
+live, timestamped, TX/RX-marked, no save prompt, and no need to hand-roll
+incremental re-rendering of a virtual document via a custom
+`TextDocumentContentProvider`. If the user has also set a default "Log
+Folder" (a `context.globalState`-persisted Uri, browsed via
+`vscode.window.showOpenDialog`), turning Record on *additionally* writes the
+same lines to an auto-named file in that folder (`<port>_<ISO
+timestamp>.log`) via debounced `vscode.workspace.fs.writeFile` calls in
+`PortConnection` — never raw Node `fs`, to preserve the WSL-transparency
+property described above. With no Log Folder configured, Record behaves
+exactly as before: OutputChannel only, nothing persisted to disk.
 
 ## Publishing
 

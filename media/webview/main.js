@@ -92,6 +92,18 @@
       </div>`;
   }
 
+  function renderLogFolderRow() {
+    const folder = lastState.logFolder;
+    return `
+      <div class="row">
+        <span class="muted truncate" title="${escapeHtml(folder ?? '')}">${
+          folder ? escapeHtml(folder) : 'No log folder set — Record only shows in Output'
+        }</span>
+        <button data-action="browse-log-folder">${folder ? 'Change…' : 'Set Log Folder…'}</button>
+        ${folder ? '<button data-action="clear-log-folder">Clear</button>' : ''}
+      </div>`;
+  }
+
   function renderPortPicker() {
     const openPaths = new Set(lastState.sessions.map((session) => session.path));
     const options =
@@ -133,8 +145,13 @@
         <div class="row checkboxes">
           <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
           <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Recv</label>
-          <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''}> Record to Output Channel</label>
+          <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''}> Record</label>
         </div>
+        ${
+          session.recording && session.logFilePath
+            ? `<div class="muted truncate" title="${escapeHtml(session.logFilePath)}">Logging to ${escapeHtml(session.logFilePath)}</div>`
+            : ''
+        }
         <div class="stats muted">TX: ${session.stats.bytesSent} bytes &nbsp; RX: ${session.stats.bytesReceived} bytes</div>`;
     return `
       <div class="session-card">
@@ -233,7 +250,7 @@
         <div class="section-header collapsible-header" data-action="toggle-default-settings">
           <h3>${ui.defaultSettingsCollapsed ? '▸' : '▾'} Default Settings</h3>
         </div>
-        ${ui.defaultSettingsCollapsed ? '' : renderConfigControls('default', lastState.defaultConfig, false)}
+        ${ui.defaultSettingsCollapsed ? '' : renderLogFolderRow() + renderConfigControls('default', lastState.defaultConfig, false)}
       </section>
       ${renderSessions()}
       ${renderTemplates()}
@@ -332,6 +349,12 @@
     switch (el.dataset.action) {
       case 'refresh-ports':
         postMessage({ type: 'refreshPorts' });
+        break;
+      case 'browse-log-folder':
+        postMessage({ type: 'browseLogFolder' });
+        break;
+      case 'clear-log-folder':
+        postMessage({ type: 'clearLogFolder' });
         break;
       case 'toggle-default-settings':
         ui.defaultSettingsCollapsed = !ui.defaultSettingsCollapsed;

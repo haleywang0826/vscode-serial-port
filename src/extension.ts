@@ -8,7 +8,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const connections = new ConnectionManager();
   const templates = new TemplateStore(context.globalState);
   const terminals = new Map<string, SerialTerminal>();
-  const panelProvider = new SerialPanelProvider(context.extensionUri, connections, templates, terminals);
+  const panelProvider = new SerialPanelProvider(
+    context.extensionUri,
+    connections,
+    templates,
+    terminals,
+    context.globalState,
+  );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('serialPortExplorer', panelProvider, {

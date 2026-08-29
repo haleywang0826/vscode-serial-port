@@ -23,6 +23,8 @@ export interface PortStats {
   bytesReceived: number;
 }
 
+const LOG_FLUSH_DEBOUNCE_MS = 300;
+
 /** Live handle to one open serial port: I/O, config, format toggles, counters, and optional recording. */
 export class PortConnection {
   readonly path: string;
@@ -34,6 +36,10 @@ export class PortConnection {
 
   private readonly port: SerialPort;
   private outputChannel: vscode.OutputChannel | undefined;
+  private logFileUri: vscode.Uri | undefined;
+  private logBuffer = '';
+  private logFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  private logFlushChain: Promise<void> = Promise.resolve();
 
   private readonly onDidReceiveDataEmitter = new vscode.EventEmitter<Uint8Array>();
   readonly onDidReceiveData = this.onDidReceiveDataEmitter.event;
@@ -120,10 +126,17 @@ export class PortConnection {
     this.onDidUpdateEmitter.fire();
   }
 
-  setRecording(value: boolean): void {
+  setRecording(value: boolean, logFolderUri?: vscode.Uri): void {
     this.recording = value;
     if (value) {
       this.getOutputChannel().show(true);
+      if (logFolderUri) {
+        this.logFileUri = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
+        this.logBuffer = '';
+      }
+    } else {
+      this.flushLogFile();
+      this.logFileUri = undefined;
     }
     this.onDidUpdateEmitter.fire();
   }
@@ -132,7 +145,15 @@ export class PortConnection {
     return this.port.isOpen;
   }
 
+  get logFilePath(): string | undefined {
+    return this.logFileUri?.fsPath;
+  }
+
   dispose(): void {
+    this.flushLogFile();
+    if (this.logFlushTimer) {
+      clearTimeout(this.logFlushTimer);
+    }
     this.outputChannel?.dispose();
     this.onDidReceiveDataEmitter.dispose();
     this.onDidCloseEmitter.dispose();
@@ -153,7 +174,36 @@ export class PortConnection {
     }
     const timestamp = new Date().toISOString().slice(11, 23);
     const formatted = formatBytes(bytes, direction === 'TX' ? this.hexSend : this.hexRecv);
-    this.getOutputChannel().appendLine(`[${timestamp}] ${direction}: ${formatted}`);
+    const line = `[${timestamp}] ${direction}: ${formatted}`;
+    this.getOutputChannel().appendLine(line);
+    if (this.logFileUri) {
+      this.logBuffer += line + '\n';
+      this.scheduleLogFlush();
+    }
+  }
+
+  private scheduleLogFlush(): void {
+    if (this.logFlushTimer) {
+      return;
+    }
+    this.logFlushTimer = setTimeout(() => {
+      this.logFlushTimer = undefined;
+      this.flushLogFile();
+    }, LOG_FLUSH_DEBOUNCE_MS);
+  }
+
+  private flushLogFile(): void {
+    if (!this.logFileUri || this.logBuffer.length === 0) {
+      return;
+    }
+    const uri = this.logFileUri;
+    const content = Buffer.from(this.logBuffer, 'utf8');
+    this.logFlushChain = this.logFlushChain
+      .then(() => vscode.workspace.fs.writeFile(uri, content))
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        vscode.window.showErrorMessage(`Failed to write serial log file: ${message}`);
+      });
   }
 
   private getOutputChannel(): vscode.OutputChannel {
@@ -216,4 +266,10 @@ export class ConnectionManager {
     this.connections.clear();
     this.onDidChangeEmitter.dispose();
   }
+}
+
+function buildLogFileName(portPath: string): string {
+  const sanitizedPath = portPath.replace(/[\\/:*?"<>|]/g, '_');
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return `${sanitizedPath}_${timestamp}.log`;
 }
