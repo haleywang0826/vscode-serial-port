@@ -89,19 +89,37 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   both were hard requirements, so the presentation layer moved to a webview
   where a real `<select>` and `<button>` do both for free.
   `serialPanelProvider.ts` builds the nonce/CSP-gated HTML, serializes all
-  panel state (ports, selected port, default config, resolved log folder,
-  open sessions, templates) via `buildState()`, and pushes it to the webview
-  as `{type: 'state', state}` on resolve, on visibility change, on an
-  explicit `refreshPorts` message, and (debounced 150ms) whenever
-  `ConnectionManager.onDidChange` fires. `media/webview/main.js` is vanilla
+  panel state (ports, selected port, default config/hex, resolved log
+  folder, sessions, templates) via `buildState()`, and pushes it to the
+  webview as `{type: 'state', state}` on resolve, on visibility change, on
+  an explicit `refreshPorts` message, and (debounced 150ms) whenever
+  `ConnectionManager.onDidChange` fires. Sessions are **persistent**, not
+  derived solely from `connections.list()`: the provider tracks
+  `sessionOrder: string[]` (paths ever added via the "+" button, in
+  add-order — a session card renders for every entry regardless of whether
+  its port is currently open) and `closedMeta: Map<string,
+  StoredSessionMeta>` (a config/hex/log/stats snapshot captured by a
+  `connection.onDidClose` listener at the moment a port closes, for any
+  reason — explicit toggle-off or physical disconnect). This lets a
+  session's settings and log-file reference survive a close and be
+  restored on reopen. `buildState()` builds each `PanelSession` (with a
+  `connected: boolean` flag) from the live `PortConnection` when open, or
+  from `closedMeta` (falling back to the defaults) when not. `main.js`
+  renders each session with an open/close toggle button (`togglePort`)
+  plus a separate remove button (`removeSession`) that drops it from
+  `sessionOrder`/`closedMeta` for good; the port picker itself is just a
+  `<select>` plus a "+" icon button (`addPort`) that adds the selected
+  path to `sessionOrder` and opens it. `media/webview/main.js` is vanilla
   JS with no framework or bundler — it does a full DOM re-render from that
   state on every message and posts action messages back
-  (`selectPort`, `openPort`, `closePort`, `refreshPorts`,
-  `updateDefaultSetting`, `updateSessionBaudRate`, `setCheckbox`,
-  `addTemplate`, `updateTemplate`, `deleteTemplate`, `sendTemplate`,
-  `browseLogFolder`, `clearLogFolder`, `openLogFile`); it keeps in-progress
-  form edits in local JS state (not the pushed state) so an unrelated push
-  (e.g. another port's byte counter) can't clobber them.
+  (`selectPort`, `addPort`, `togglePort`, `removeSession`, `refreshPorts`,
+  `updateDefaultSetting`, `updateDefaultCheckbox`, `updateSessionBaudRate`,
+  `setCheckbox`, `addTemplate`, `updateTemplate`, `deleteTemplate`,
+  `sendTemplate`, `browseLogFolder`, `clearLogFolder`, `openLogFile`); it
+  keeps in-progress form edits and fold state (Default Settings and Send
+  Templates both default to collapsed) in local JS state (not the pushed
+  state) so an unrelated push (e.g. another port's byte counter) can't
+  clobber them.
 - `templates/templateStore.ts` — CRUD for send templates over
   `context.globalState` (global, not workspace-scoped).
 

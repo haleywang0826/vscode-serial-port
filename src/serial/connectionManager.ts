@@ -12,7 +12,7 @@ export interface PortConfig {
 }
 
 export const DEFAULT_PORT_CONFIG: PortConfig = {
-  baudRate: 9600,
+  baudRate: 115200,
   dataBits: 8,
   parity: 'none',
   stopBits: 1,
@@ -29,8 +29,8 @@ const LOG_FLUSH_DEBOUNCE_MS = 300;
 export class PortConnection {
   readonly path: string;
   config: PortConfig;
-  hexSend = true;
-  hexRecv = true;
+  hexSend = false;
+  hexRecv = false;
   recording = false;
   readonly stats: PortStats = { bytesSent: 0, bytesReceived: 0 };
 

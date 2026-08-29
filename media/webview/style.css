@@ -58,6 +58,7 @@ h3 {
 .config-grid {
   display: grid;
   grid-template-columns: auto 1fr;
+  justify-items: start;
   align-items: center;
   gap: 4px 8px;
   margin-bottom: 8px;
@@ -76,7 +77,7 @@ textarea {
   color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
   border: 1px solid var(--vscode-dropdown-border, var(--vscode-widget-border));
   border-radius: 2px;
-  padding: 2px 4px;
+  padding: 1px 4px;
   font-family: inherit;
   font-size: inherit;
 }
@@ -137,6 +138,28 @@ button:disabled {
   word-break: break-all;
 }
 
+.session-actions {
+  margin-bottom: 0;
+}
+
+.toggle-button.is-closed {
+  background-color: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+}
+
+.toggle-button.is-closed:hover:not(:disabled) {
+  background-color: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
+}
+
+.status-closed {
+  color: var(--vscode-descriptionForeground);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  margin-left: 6px;
+}
+
 .stats {
   margin-top: 4px;
 }
@@ -156,18 +179,31 @@ button:disabled {
 
 .template-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  flex-direction: column;
+  gap: 2px;
   padding: 4px 0;
   border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
 }
 
-.template-info {
+.template-row-main {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.template-row-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.template-actions {
+  flex: none;
+  display: flex;
+  gap: 2px;
 }
 
 .badge {

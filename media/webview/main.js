@@ -11,7 +11,9 @@
   let lastState = {
     ports: [],
     selectedPort: undefined,
-    defaultConfig: { baudRate: 9600, dataBits: 8, parity: 'none', stopBits: 1 },
+    defaultConfig: { baudRate: 115200, dataBits: 8, parity: 'none', stopBits: 1 },
+    defaultHexSend: false,
+    defaultHexRecv: false,
     logFolder: '',
     logFolderIsCustom: false,
     sessions: [],
@@ -26,8 +28,10 @@
     editingTemplateId: null,
     editTemplateDraft: { name: '', format: 'hex', data: '' },
     customBaud: {},
-    defaultSettingsCollapsed: false,
+    defaultSettingsCollapsed: true,
     collapsedSessions: new Set(),
+    templatesCollapsed: true,
+    templateTargetPath: undefined,
   };
 
   function postMessage(message) {
@@ -52,14 +56,15 @@
     return prefix === 'add' ? ui.addTemplateDraft : ui.editTemplateDraft;
   }
 
-  function renderConfigControls(prefix, config, locked) {
+  function renderConfigControls(prefix, config, locked, lockBaud) {
     const showCustomBaud = ui.customBaud[prefix] || !BAUD_RATE_PRESETS.includes(config.baudRate);
     const lockedAttrs = locked ? 'disabled title="Reopen the port to change this"' : '';
+    const baudLockedAttrs = lockBaud ? 'disabled title="Reopen the port to change this"' : '';
     return `
       <div class="config-grid">
         <label>Baud Rate</label>
         <div class="row">
-          <select data-action="setting" data-prefix="${prefix}" data-field="baudRate">
+          <select data-action="setting" data-prefix="${prefix}" data-field="baudRate" ${baudLockedAttrs}>
             ${BAUD_RATE_PRESETS.map(
               (rate) =>
                 `<option value="${rate}" ${config.baudRate === rate && !showCustomBaud ? 'selected' : ''}>${rate}</option>`,
@@ -68,7 +73,7 @@
           </select>
           ${
             showCustomBaud
-              ? `<input type="number" min="1" data-action="setting-custom-baud" data-prefix="${prefix}" value="${config.baudRate}">`
+              ? `<input type="number" min="1" data-action="setting-custom-baud" data-prefix="${prefix}" value="${config.baudRate}" ${baudLockedAttrs}>`
               : ''
           }
         </div>
@@ -106,31 +111,23 @@
   }
 
   function renderPortPicker() {
-    const openPaths = new Set(lastState.sessions.map((session) => session.path));
     const options =
       lastState.ports.length === 0
         ? '<option value="">No ports found</option>'
         : lastState.ports
             .map((port) => {
               const label = port.description ? `${port.path} (${port.description})` : port.path;
-              const suffix = openPaths.has(port.path) ? ' — opened' : '';
               const selected = lastState.selectedPort === port.path ? 'selected' : '';
-              const disabled = openPaths.has(port.path) ? 'disabled' : '';
-              return `<option value="${escapeHtml(port.path)}" ${selected} ${disabled}>${escapeHtml(label + suffix)}</option>`;
+              return `<option value="${escapeHtml(port.path)}" ${selected}>${escapeHtml(label)}</option>`;
             })
             .join('');
-    const isSelectedOpen = lastState.selectedPort ? openPaths.has(lastState.selectedPort) : false;
-    const openDisabled = !lastState.selectedPort || isSelectedOpen;
-    const openLabel = isSelectedOpen ? 'Already open' : 'Open';
     return `
       <section class="panel-section">
         <h3>Port</h3>
         <div class="row">
           <select id="port-select">${options}</select>
-          <button data-action="refresh-ports" title="Refresh port list">&#8635;</button>
-        </div>
-        <div class="row">
-          <button data-action="open-port" ${openDisabled ? 'disabled' : ''}>${openLabel}</button>
+          <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to sessions">+</button>
+          <button class="icon-button" data-action="refresh-ports" title="Refresh port list">&#8635;</button>
         </div>
       </section>`;
   }
@@ -139,14 +136,15 @@
     const prefix = `session:${session.path}`;
     const collapsed = ui.collapsedSessions.has(session.path);
     const chevron = collapsed ? '▸' : '▾';
+    const statusBadge = session.connected ? '' : '<span class="status-closed">closed</span>';
     const body = collapsed
       ? ''
       : `
-        ${renderConfigControls(prefix, session.config, true)}
+        ${renderConfigControls(prefix, session.config, true, !session.connected)}
         <div class="row checkboxes">
           <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
           <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Recv</label>
-          <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''}> Record</label>
+          <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''} ${session.connected ? '' : 'disabled title="Open the port to record"'}> Record</label>
         </div>
         ${
           session.logFilePath
@@ -160,8 +158,11 @@
     return `
       <div class="session-card">
         <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
-          <strong>${chevron} ${escapeHtml(session.path)}</strong>
-          <button data-action="close-port" data-path="${escapeHtml(session.path)}">Close</button>
+          <strong>${chevron} ${escapeHtml(session.path)}</strong>${statusBadge}
+          <div class="row session-actions">
+            <button class="toggle-button ${session.connected ? 'is-open' : 'is-closed'}" data-action="toggle-port" data-path="${escapeHtml(session.path)}">${session.connected ? 'Close' : 'Open'}</button>
+            <button class="icon-button" data-action="remove-session" data-path="${escapeHtml(session.path)}" title="Remove">&#10005;</button>
+          </div>
         </div>
         ${body}
       </div>`;
@@ -170,7 +171,7 @@
   function renderSessions() {
     const body =
       lastState.sessions.length === 0
-        ? '<p class="muted">No open ports.</p>'
+        ? '<p class="muted">No ports added.</p>'
         : lastState.sessions.map(renderSession).join('');
     return `
       <section class="panel-section">
@@ -198,46 +199,67 @@
       </div>`;
   }
 
+  function renderTemplateTargetSelect() {
+    const connected = lastState.sessions.filter((session) => session.connected);
+    if (connected.length === 0) {
+      ui.templateTargetPath = undefined;
+      return '<p class="muted">No ports are open.</p>';
+    }
+    if (!connected.some((session) => session.path === ui.templateTargetPath)) {
+      ui.templateTargetPath = connected[0].path;
+    }
+    return `
+      <div class="row">
+        <label class="muted">Send to</label>
+        <select data-action="template-target-select">
+          ${connected
+            .map(
+              (session) =>
+                `<option value="${escapeHtml(session.path)}" ${session.path === ui.templateTargetPath ? 'selected' : ''}>${escapeHtml(session.path)}</option>`,
+            )
+            .join('')}
+        </select>
+      </div>`;
+  }
+
   function renderTemplateRow(template) {
     if (ui.editingTemplateId === template.id) {
       return renderTemplateForm('edit', ui.editTemplateDraft, template.id);
     }
-    const openSessions = lastState.sessions;
-    const targetSelect =
-      openSessions.length > 1
-        ? `<select data-action="template-target" data-id="${template.id}">
-            ${openSessions
-              .map((session) => `<option value="${escapeHtml(session.path)}">${escapeHtml(session.path)}</option>`)
-              .join('')}
-          </select>`
-        : '';
-    const sendDisabled = openSessions.length === 0 ? 'disabled title="No ports are open"' : '';
+    const sendDisabled = ui.templateTargetPath ? '' : 'disabled title="No ports are open"';
     return `
       <div class="template-row">
-        <div class="template-info">
+        <div class="template-row-main">
           <strong>${escapeHtml(template.name)}</strong>
           <span class="badge">${template.format}</span>
-          <span class="muted truncate">${escapeHtml(template.data)}</span>
         </div>
-        <div class="row">
-          ${targetSelect}
-          <button data-action="send-template" data-id="${template.id}" ${sendDisabled}>Send</button>
-          <button data-action="edit-template-toggle" data-id="${template.id}">Edit</button>
-          <button data-action="delete-template" data-id="${template.id}">Delete</button>
+        <div class="template-row-sub">
+          <span class="muted truncate">${escapeHtml(template.data)}</span>
+          <div class="row template-actions">
+            <button class="icon-button" data-action="send-template" data-id="${template.id}" ${sendDisabled} title="Send">&#9658;</button>
+            <button class="icon-button" data-action="edit-template-toggle" data-id="${template.id}" title="Edit">&#9998;</button>
+            <button class="icon-button" data-action="delete-template" data-id="${template.id}" title="Delete">&#128465;</button>
+          </div>
         </div>
       </div>`;
   }
 
   function renderTemplates() {
     const addForm = ui.addingTemplate ? renderTemplateForm('add', ui.addTemplateDraft) : '';
+    const chevron = ui.templatesCollapsed ? '▸' : '▾';
+    const body = ui.templatesCollapsed
+      ? ''
+      : `
+        ${renderTemplateTargetSelect()}
+        ${addForm}
+        ${lastState.templates.map(renderTemplateRow).join('')}`;
     return `
       <section class="panel-section">
-        <div class="section-header">
-          <h3>Send Templates</h3>
-          <button data-action="add-template-toggle">+ Add</button>
+        <div class="section-header collapsible-header" data-action="toggle-templates">
+          <h3>${chevron} Send Templates</h3>
+          <button class="icon-button" data-action="add-template-toggle" title="Add template">+</button>
         </div>
-        ${addForm}
-        ${lastState.templates.map(renderTemplateRow).join('')}
+        ${body}
       </section>`;
   }
 
@@ -250,14 +272,24 @@
 
     root.innerHTML = `
       ${renderPortPicker()}
+      ${renderSessions()}
+      ${renderTemplates()}
       <section class="panel-section">
         <div class="section-header collapsible-header" data-action="toggle-default-settings">
           <h3>${ui.defaultSettingsCollapsed ? '▸' : '▾'} Default Settings</h3>
         </div>
-        ${ui.defaultSettingsCollapsed ? '' : renderLogFolderRow() + renderConfigControls('default', lastState.defaultConfig, false)}
+        ${
+          ui.defaultSettingsCollapsed
+            ? ''
+            : `
+              ${renderLogFolderRow()}
+              ${renderConfigControls('default', lastState.defaultConfig, false, false)}
+              <div class="row checkboxes">
+                <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexSend" ${lastState.defaultHexSend ? 'checked' : ''}> Hex Send</label>
+                <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexRecv" ${lastState.defaultHexRecv ? 'checked' : ''}> Hex Recv</label>
+              </div>`
+        }
       </section>
-      ${renderSessions()}
-      ${renderTemplates()}
     `;
 
     if (focusInfo) {
@@ -325,6 +357,14 @@
       });
       return;
     }
+    if (el.matches('[data-action="default-checkbox"]')) {
+      postMessage({ type: 'updateDefaultCheckbox', checkbox: el.dataset.checkbox, value: el.checked });
+      return;
+    }
+    if (el.matches('[data-action="template-target-select"]')) {
+      ui.templateTargetPath = el.value;
+      return;
+    }
     if (el.matches('.template-form select[name="format"]')) {
       const form = el.closest('.template-form');
       draftFor(form.dataset.draft === 'add' ? 'add' : 'edit').format = el.value;
@@ -377,15 +417,25 @@
         render();
         break;
       }
-      case 'open-port':
-        postMessage({ type: 'openPort' });
+      case 'add-port':
+        postMessage({ type: 'addPort' });
         break;
-      case 'close-port':
-        postMessage({ type: 'closePort', path: el.dataset.path });
+      case 'toggle-port':
+        postMessage({ type: 'togglePort', path: el.dataset.path });
+        break;
+      case 'remove-session':
+        postMessage({ type: 'removeSession', path: el.dataset.path });
+        break;
+      case 'toggle-templates':
+        ui.templatesCollapsed = !ui.templatesCollapsed;
+        render();
         break;
       case 'add-template-toggle':
         ui.addingTemplate = !ui.addingTemplate;
         ui.addTemplateDraft = { name: '', format: 'hex', data: '' };
+        if (ui.addingTemplate) {
+          ui.templatesCollapsed = false;
+        }
         render();
         break;
       case 'add-template-cancel':
@@ -433,12 +483,9 @@
       case 'delete-template':
         postMessage({ type: 'deleteTemplate', id: el.dataset.id });
         break;
-      case 'send-template': {
-        const id = el.dataset.id;
-        const select = root.querySelector(`select[data-action="template-target"][data-id="${id}"]`);
-        postMessage({ type: 'sendTemplate', id, path: select ? select.value : undefined });
+      case 'send-template':
+        postMessage({ type: 'sendTemplate', id: el.dataset.id, path: ui.templateTargetPath });
         break;
-      }
     }
   });
 

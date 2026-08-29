@@ -10,14 +10,17 @@ const LOG_FOLDER_KEY = 'serialPort.logFolder';
 
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
 type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record';
+type DefaultCheckbox = 'hexSend' | 'hexRecv';
 
 type ClientMessage =
   | { type: 'ready' }
   | { type: 'refreshPorts' }
   | { type: 'selectPort'; path: string }
-  | { type: 'openPort' }
-  | { type: 'closePort'; path: string }
+  | { type: 'addPort' }
+  | { type: 'togglePort'; path: string }
+  | { type: 'removeSession'; path: string }
   | { type: 'updateDefaultSetting'; field: SettingField; value: string }
+  | { type: 'updateDefaultCheckbox'; checkbox: DefaultCheckbox; value: boolean }
   | { type: 'updateSessionBaudRate'; path: string; baudRate: number }
   | { type: 'setCheckbox'; path: string; checkbox: SessionCheckbox; value: boolean }
   | { type: 'addTemplate'; name: string; format: SendFormat; data: string }
@@ -28,8 +31,19 @@ type ClientMessage =
   | { type: 'clearLogFolder' }
   | { type: 'openLogFile'; path: string };
 
+/** Snapshot of a session's settings taken the moment its port closes (by any cause), so a
+ * session card can survive the close and be reopened without losing its configuration. */
+interface StoredSessionMeta {
+  config: PortConfig;
+  hexSend: boolean;
+  hexRecv: boolean;
+  logFilePath: string | undefined;
+  stats: { bytesSent: number; bytesReceived: number };
+}
+
 interface PanelSession {
   path: string;
+  connected: boolean;
   config: PortConfig;
   hexSend: boolean;
   hexRecv: boolean;
@@ -42,6 +56,8 @@ interface PanelState {
   ports: { path: string; description: string }[];
   selectedPort: string | undefined;
   defaultConfig: PortConfig;
+  defaultHexSend: boolean;
+  defaultHexRecv: boolean;
   logFolder: string;
   logFolderIsCustom: boolean;
   sessions: PanelSession[];
@@ -57,8 +73,16 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
   private view: vscode.WebviewView | undefined;
   private selectedPort: string | undefined;
   private defaultConfig: PortConfig = { ...DEFAULT_PORT_CONFIG };
+  private defaultHexSend = false;
+  private defaultHexRecv = false;
   private logFolderUri: vscode.Uri | undefined;
   private ports: { path: string; description: string }[] = [];
+  /** Paths ever added via the "+" button, in add-order. A session card renders for every entry
+   * here regardless of whether its port is currently open — see `closedMeta` below. */
+  private sessionOrder: string[] = [];
+  /** Settings snapshot for a session whose port is currently closed, so the card can still show
+   * (and reopen with) its last-known config/hex/log state. */
+  private readonly closedMeta = new Map<string, StoredSessionMeta>();
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
 
@@ -117,14 +141,25 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         this.selectedPort = message.path;
         this.postState();
         break;
-      case 'openPort':
-        void this.openSelectedPort();
+      case 'addPort':
+        void this.addPort();
         break;
-      case 'closePort':
-        void this.connections.close(message.path);
+      case 'togglePort':
+        void this.togglePort(message.path);
+        break;
+      case 'removeSession':
+        void this.removeSession(message.path);
         break;
       case 'updateDefaultSetting':
         this.defaultConfig = applySetting(this.defaultConfig, message.field, message.value);
+        this.postState();
+        break;
+      case 'updateDefaultCheckbox':
+        if (message.checkbox === 'hexSend') {
+          this.defaultHexSend = message.value;
+        } else {
+          this.defaultHexRecv = message.value;
+        }
         this.postState();
         break;
       case 'updateSessionBaudRate':
@@ -169,18 +204,61 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     this.postState();
   }
 
-  private async openSelectedPort(): Promise<void> {
+  private async addPort(): Promise<void> {
     const path = this.selectedPort;
     if (!path) {
       vscode.window.showInformationMessage('Select a port first.');
       return;
     }
+    if (!this.sessionOrder.includes(path)) {
+      this.sessionOrder.push(path);
+    }
     if (this.connections.isOpen(path)) {
       vscode.window.showInformationMessage(`${path} is already open.`);
+      this.postState();
       return;
     }
+    await this.openPath(path);
+  }
+
+  private async togglePort(path: string): Promise<void> {
+    if (this.connections.isOpen(path)) {
+      await this.connections.close(path);
+      this.postState();
+    } else {
+      await this.openPath(path);
+    }
+  }
+
+  private async removeSession(path: string): Promise<void> {
+    if (this.connections.isOpen(path)) {
+      await this.connections.close(path);
+    }
+    this.sessionOrder = this.sessionOrder.filter((p) => p !== path);
+    this.closedMeta.delete(path);
+    this.postState();
+  }
+
+  /** Opens (or reopens) a port, restoring its last-known config/hex settings if it was
+   * previously added and closed, then attaches the terminal and a listener that snapshots
+   * the session's state into `closedMeta` whenever it closes again, for any reason. */
+  private async openPath(path: string): Promise<void> {
+    const meta = this.closedMeta.get(path);
+    const config = meta?.config ?? this.defaultConfig;
     try {
-      const connection = await this.connections.open(path, this.defaultConfig);
+      const connection = await this.connections.open(path, config);
+      connection.setHexSend(meta?.hexSend ?? this.defaultHexSend);
+      connection.setHexRecv(meta?.hexRecv ?? this.defaultHexRecv);
+      connection.onDidClose(() => {
+        this.closedMeta.set(path, {
+          config: connection.config,
+          hexSend: connection.hexSend,
+          hexRecv: connection.hexRecv,
+          logFilePath: connection.logFilePath,
+          stats: { ...connection.stats },
+        });
+      });
+      this.closedMeta.delete(path);
       const terminal = createSerialTerminal(connection);
       this.terminals.set(path, terminal);
       terminal.terminal.show(false);
@@ -227,19 +305,26 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
 
   private setCheckbox(path: string, checkbox: SessionCheckbox, value: boolean): void {
     const connection = this.connections.get(path);
-    if (!connection) {
+    if (connection) {
+      switch (checkbox) {
+        case 'hexSend':
+          connection.setHexSend(value);
+          break;
+        case 'hexRecv':
+          connection.setHexRecv(value);
+          break;
+        case 'record':
+          connection.setRecording(value, this.resolveLogFolderUri());
+          break;
+      }
       return;
     }
-    switch (checkbox) {
-      case 'hexSend':
-        connection.setHexSend(value);
-        break;
-      case 'hexRecv':
-        connection.setHexRecv(value);
-        break;
-      case 'record':
-        connection.setRecording(value, this.resolveLogFolderUri());
-        break;
+    // No live connection: remember the setting on the closed session so a later reopen
+    // picks it up. Recording only makes sense while connected, so it's ignored here.
+    const meta = this.closedMeta.get(path);
+    if (meta && (checkbox === 'hexSend' || checkbox === 'hexRecv')) {
+      meta[checkbox] = value;
+      this.postState();
     }
   }
 
@@ -266,8 +351,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     }
   }
 
-  /** Tears down the terminal for any session that closed without going through a closePort message
-   * (e.g. the device was physically unplugged). */
+  /** Tears down the terminal for any session whose connection is no longer open, whether it was
+   * closed via the panel or the device was physically unplugged. */
   private pruneClosedTerminals(): void {
     for (const [path, terminal] of this.terminals) {
       if (!this.connections.isOpen(path)) {
@@ -300,17 +385,36 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       ports: this.ports,
       selectedPort: this.selectedPort,
       defaultConfig: this.defaultConfig,
+      defaultHexSend: this.defaultHexSend,
+      defaultHexRecv: this.defaultHexRecv,
       logFolder: this.resolveLogFolderUri().fsPath,
       logFolderIsCustom: this.logFolderUri !== undefined,
-      sessions: this.connections.list().map((connection) => ({
-        path: connection.path,
-        config: connection.config,
-        hexSend: connection.hexSend,
-        hexRecv: connection.hexRecv,
-        recording: connection.recording,
-        logFilePath: connection.logFilePath,
-        stats: connection.stats,
-      })),
+      sessions: this.sessionOrder.map((path) => {
+        const connection = this.connections.get(path);
+        if (connection) {
+          return {
+            path,
+            connected: true,
+            config: connection.config,
+            hexSend: connection.hexSend,
+            hexRecv: connection.hexRecv,
+            recording: connection.recording,
+            logFilePath: connection.logFilePath,
+            stats: connection.stats,
+          };
+        }
+        const meta = this.closedMeta.get(path);
+        return {
+          path,
+          connected: false,
+          config: meta?.config ?? this.defaultConfig,
+          hexSend: meta?.hexSend ?? this.defaultHexSend,
+          hexRecv: meta?.hexRecv ?? this.defaultHexRecv,
+          recording: false,
+          logFilePath: meta?.logFilePath,
+          stats: meta?.stats ?? { bytesSent: 0, bytesReceived: 0 },
+        };
+      }),
       templates: this.templates.list(),
     };
   }
