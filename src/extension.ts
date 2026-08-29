@@ -13,7 +13,6 @@ export function activate(context: vscode.ExtensionContext): void {
     connections,
     templates,
     terminals,
-    context.globalState,
     context.globalStorageUri,
   );
 

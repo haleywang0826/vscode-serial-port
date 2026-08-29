@@ -231,6 +231,29 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   border-less siblings — otherwise the extra border width would inflate
   that button's box and throw off the flex-centered icon glyph relative to
   the row it sits in.
+  Default Settings (baud/data bits/parity/stop bits/hex send/hex recv
+  defaults), Log Folder, and TX/RX Terminal Colors are all real
+  `contributes.configuration` entries (`serialPort.default*`,
+  `serialPort.logFolder`, `serialPort.txColor`, `serialPort.rxColor` — see
+  `package.json`), not `context.globalState` or in-memory fields, so they
+  get native User/Workspace/Folder scoping through VS Code's own Settings
+  UI/`settings.json` for free. `SerialPanelProvider` reads them via
+  `vscode.workspace.getConfiguration('serialPort')` on every `buildState()`
+  call (so it always reflects the effective, merged value) and subscribes
+  to `vscode.workspace.onDidChangeConfiguration` (filtered with
+  `affectsConfiguration('serialPort')`) to push a fresh state whenever a
+  setting changes out-of-panel (Settings UI, hand-edited `settings.json`,
+  or a Workspace-level `.vscode/settings.json`). The panel's own controls
+  (Default Settings fields/checkboxes, log-folder browse/reset buttons,
+  TX/RX color pickers) always write via `config.update(key, value,
+  vscode.ConfigurationTarget.Global)` — i.e. every in-panel edit targets
+  User scope, since the panel itself has no scope picker; a user who wants
+  a workspace-specific override sets it through Settings UI's Workspace
+  tab or `.vscode/settings.json` directly, which the panel picks up live.
+  `terminalColors` stays a single mutable object (never reassigned) so its
+  reference passed into every open terminal (see `TerminalColors` below)
+  keeps working after a config-driven color change — only its `.tx`/`.rx`
+  properties are mutated in place.
 - `templates/templateStore.ts` — CRUD for send templates over
   `context.globalState` (global, not workspace-scoped).
 
@@ -243,9 +266,9 @@ shows the same live TX/RX traffic, so a second live view would be
 redundant. The destination folder defaults to `<workspace root>/serial
 logs` (auto-created via `vscode.workspace.fs.createDirectory`), falling
 back to the extension's `context.globalStorageUri` when no workspace
-folder is open; a custom "Log Folder" override (persisted in
-`context.globalState`, browsed via `vscode.window.showOpenDialog`) takes
-priority over that default when set. Turning Record off flushes and keeps
+folder is open; a custom "Log Folder" override (the `serialPort.logFolder`
+setting, browsed via `vscode.window.showOpenDialog`) takes priority over
+that default when set. Turning Record off flushes and keeps
 the file path around (rather than clearing it) so the panel can still show
 and open the completed log — each session card has an icon button that
 opens its current log file via `vscode.window.showTextDocument`.

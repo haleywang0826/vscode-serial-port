@@ -47,6 +47,59 @@
         }
       ]
     },
+    "configuration": {
+      "title": "Serial Port",
+      "properties": {
+        "serialPort.defaultBaudRate": {
+          "type": "number",
+          "default": 115200,
+          "description": "Default baud rate used when a newly added port is opened."
+        },
+        "serialPort.defaultDataBits": {
+          "type": "number",
+          "enum": [5, 6, 7, 8],
+          "default": 8,
+          "description": "Default data bits used when a newly added port is opened."
+        },
+        "serialPort.defaultParity": {
+          "type": "string",
+          "enum": ["none", "even", "odd", "mark", "space"],
+          "default": "none",
+          "description": "Default parity used when a newly added port is opened."
+        },
+        "serialPort.defaultStopBits": {
+          "type": "number",
+          "enum": [1, 1.5, 2],
+          "default": 1,
+          "description": "Default stop bits used when a newly added port is opened."
+        },
+        "serialPort.defaultHexSend": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default Hex Send state used when a newly added port is opened."
+        },
+        "serialPort.defaultHexRecv": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default Hex Receive state used when a newly added port is opened."
+        },
+        "serialPort.logFolder": {
+          "type": "string",
+          "default": "",
+          "description": "Folder to write serial session log files to. When empty, defaults to '<workspace root>/serial logs', falling back to the extension's global storage folder when no workspace is open."
+        },
+        "serialPort.txColor": {
+          "type": "string",
+          "default": "#00cccc",
+          "description": "Terminal color for transmitted (TX) bytes, as a CSS hex color."
+        },
+        "serialPort.rxColor": {
+          "type": "string",
+          "default": "#33cc33",
+          "description": "Terminal color for received (RX) bytes, as a CSS hex color."
+        }
+      }
+    },
     "problemMatchers": [
       {
         "name": "esbuild-watch",

@@ -6,9 +6,6 @@ import { createSerialTerminal, SerialTerminal, TerminalColors } from '../serial/
 import { SendFormat, TemplateStore } from '../templates/templateStore';
 
 const REFRESH_DEBOUNCE_MS = 150;
-const LOG_FOLDER_KEY = 'serialPort.logFolder';
-const TX_COLOR_KEY = 'serialPort.txColor';
-const RX_COLOR_KEY = 'serialPort.rxColor';
 const DEFAULT_TX_COLOR = '#00cccc';
 const DEFAULT_RX_COLOR = '#33cc33';
 
@@ -86,13 +83,11 @@ interface PanelState {
 export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view: vscode.WebviewView | undefined;
   private selectedPort: string | undefined;
-  private defaultConfig: PortConfig = { ...DEFAULT_PORT_CONFIG };
-  private defaultHexSend = false;
-  private defaultHexRecv = false;
   /** User-configurable TX/RX terminal colors, passed by reference into every open terminal so a
-   * change here is visible live without reopening the port — see `TerminalColors`. */
+   * change here is visible live without reopening the port — see `TerminalColors`. Populated from
+   * (and kept in sync with) `serialPort.txColor`/`serialPort.rxColor`, but the object itself is
+   * never reassigned. */
   private readonly terminalColors: TerminalColors = { tx: DEFAULT_TX_COLOR, rx: DEFAULT_RX_COLOR };
-  private logFolderUri: vscode.Uri | undefined;
   private ports: { path: string; description: string }[] = [];
   /** Paths ever added via the "+" button, in add-order. A session card renders for every entry
    * here regardless of whether its port is currently open — see `closedMeta` below. */
@@ -108,17 +103,47 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     private readonly connections: ConnectionManager,
     private readonly templates: TemplateStore,
     private readonly terminals: Map<string, SerialTerminal>,
-    private readonly globalState: vscode.Memento,
     private readonly defaultStorageUri: vscode.Uri,
   ) {
     this.subscriptions.push(connections.onDidChange(() => this.scheduleStateRefresh()));
     this.subscriptions.push(connections.onDidChange(() => this.pruneClosedTerminals()));
-    const storedLogFolder = globalState.get<string>(LOG_FOLDER_KEY);
-    if (storedLogFolder) {
-      this.logFolderUri = vscode.Uri.parse(storedLogFolder);
-    }
-    this.terminalColors.tx = globalState.get<string>(TX_COLOR_KEY) ?? DEFAULT_TX_COLOR;
-    this.terminalColors.rx = globalState.get<string>(RX_COLOR_KEY) ?? DEFAULT_RX_COLOR;
+    this.terminalColors.tx = this.config().get<string>('txColor', DEFAULT_TX_COLOR);
+    this.terminalColors.rx = this.config().get<string>('rxColor', DEFAULT_RX_COLOR);
+    this.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((e) => {
+        if (!e.affectsConfiguration('serialPort')) {
+          return;
+        }
+        this.terminalColors.tx = this.config().get<string>('txColor', DEFAULT_TX_COLOR);
+        this.terminalColors.rx = this.config().get<string>('rxColor', DEFAULT_RX_COLOR);
+        this.postState();
+      }),
+    );
+  }
+
+  /** Reads the `serialPort.*` configuration section, merged across User/Workspace/Folder scope —
+   * VS Code's own Settings UI and `settings.json` are how a user picks which scope to write to;
+   * this panel's own controls always write to the User (Global) scope, see the handlers below. */
+  private config(): vscode.WorkspaceConfiguration {
+    return vscode.workspace.getConfiguration('serialPort');
+  }
+
+  private getDefaultConfig(): PortConfig {
+    const config = this.config();
+    return {
+      baudRate: config.get<number>('defaultBaudRate', DEFAULT_PORT_CONFIG.baudRate),
+      dataBits: config.get<PortConfig['dataBits']>('defaultDataBits', DEFAULT_PORT_CONFIG.dataBits),
+      parity: config.get<PortConfig['parity']>('defaultParity', DEFAULT_PORT_CONFIG.parity),
+      stopBits: config.get<PortConfig['stopBits']>('defaultStopBits', DEFAULT_PORT_CONFIG.stopBits),
+    };
+  }
+
+  private getDefaultHexSend(): boolean {
+    return this.config().get<boolean>('defaultHexSend', false);
+  }
+
+  private getDefaultHexRecv(): boolean {
+    return this.config().get<boolean>('defaultHexRecv', false);
   }
 
   dispose(): void {
@@ -170,21 +195,24 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         void this.removeSession(message.path);
         break;
       case 'updateDefaultSetting':
-        this.defaultConfig = applySetting(this.defaultConfig, message.field, message.value);
-        this.postState();
+        void this.updateDefaultSetting(message.field, message.value);
         break;
       case 'updateDefaultCheckbox':
-        if (message.checkbox === 'hexSend') {
-          this.defaultHexSend = message.value;
-        } else {
-          this.defaultHexRecv = message.value;
-        }
-        this.postState();
+        void this.config()
+          .update(
+            message.checkbox === 'hexSend' ? 'defaultHexSend' : 'defaultHexRecv',
+            message.value,
+            vscode.ConfigurationTarget.Global,
+          )
+          .then(() => this.postState());
         break;
       case 'updateTerminalColor':
-        this.terminalColors[message.which] = message.value;
-        void this.globalState.update(message.which === 'tx' ? TX_COLOR_KEY : RX_COLOR_KEY, message.value);
-        this.postState();
+        void this.config()
+          .update(message.which === 'tx' ? 'txColor' : 'rxColor', message.value, vscode.ConfigurationTarget.Global)
+          .then(() => {
+            this.terminalColors[message.which] = message.value;
+            this.postState();
+          });
         break;
       case 'updateSessionBaudRate':
         void this.updateSessionBaudRate(message.path, message.baudRate);
@@ -212,9 +240,9 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         void this.browseLogFolder();
         break;
       case 'clearLogFolder':
-        this.logFolderUri = undefined;
-        void this.globalState.update(LOG_FOLDER_KEY, undefined);
-        this.postState();
+        void this.config()
+          .update('logFolder', undefined, vscode.ConfigurationTarget.Global)
+          .then(() => this.postState());
         break;
       case 'openLogFile':
         void vscode.window.showTextDocument(vscode.Uri.file(message.path));
@@ -271,11 +299,11 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
    * the session's state into `closedMeta` whenever it closes again, for any reason. */
   private async openPath(path: string): Promise<void> {
     const meta = this.closedMeta.get(path);
-    const config = meta?.config ?? this.defaultConfig;
+    const config = meta?.config ?? this.getDefaultConfig();
     try {
       const connection = await this.connections.open(path, config);
-      connection.setHexSend(meta?.hexSend ?? this.defaultHexSend);
-      connection.setHexRecv(meta?.hexRecv ?? this.defaultHexRecv);
+      connection.setHexSend(meta?.hexSend ?? this.getDefaultHexSend());
+      connection.setHexRecv(meta?.hexRecv ?? this.getDefaultHexRecv());
       connection.setShowTimestamp(meta?.showTimestamp ?? false);
       // Always explicitly assert RTS/DTR (rather than only when they differ from the connection's
       // own field defaults) — the OS/driver may leave a freshly-opened port's lines in whatever
@@ -329,14 +357,26 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     if (!picked || picked.length === 0) {
       return;
     }
-    this.logFolderUri = picked[0];
-    await this.globalState.update(LOG_FOLDER_KEY, this.logFolderUri.toString());
+    await this.config().update('logFolder', picked[0].fsPath, vscode.ConfigurationTarget.Global);
+    this.postState();
+  }
+
+  private async updateDefaultSetting(field: SettingField, value: string): Promise<void> {
+    const configKey: Record<SettingField, string> = {
+      baudRate: 'defaultBaudRate',
+      dataBits: 'defaultDataBits',
+      parity: 'defaultParity',
+      stopBits: 'defaultStopBits',
+    };
+    const coerced = field === 'parity' ? value : Number(value);
+    await this.config().update(configKey[field], coerced, vscode.ConfigurationTarget.Global);
     this.postState();
   }
 
   private resolveLogFolderUri(): vscode.Uri {
-    if (this.logFolderUri) {
-      return this.logFolderUri;
+    const logFolder = this.config().get<string>('logFolder', '').trim();
+    if (logFolder) {
+      return vscode.Uri.file(logFolder);
     }
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.defaultStorageUri;
     return vscode.Uri.joinPath(workspaceRoot, 'serial logs');
@@ -433,16 +473,19 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
   }
 
   private buildState(): PanelState {
+    const defaultConfig = this.getDefaultConfig();
+    const defaultHexSend = this.getDefaultHexSend();
+    const defaultHexRecv = this.getDefaultHexRecv();
     return {
       ports: this.ports,
       selectedPort: this.selectedPort,
-      defaultConfig: this.defaultConfig,
-      defaultHexSend: this.defaultHexSend,
-      defaultHexRecv: this.defaultHexRecv,
+      defaultConfig,
+      defaultHexSend,
+      defaultHexRecv,
       txColor: this.terminalColors.tx,
       rxColor: this.terminalColors.rx,
       logFolder: this.resolveLogFolderUri().fsPath,
-      logFolderIsCustom: this.logFolderUri !== undefined,
+      logFolderIsCustom: this.config().get<string>('logFolder', '').trim().length > 0,
       sessions: this.sessionOrder.map((path) => {
         const connection = this.connections.get(path);
         if (connection) {
@@ -464,9 +507,9 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         return {
           path,
           connected: false,
-          config: meta?.config ?? this.defaultConfig,
-          hexSend: meta?.hexSend ?? this.defaultHexSend,
-          hexRecv: meta?.hexRecv ?? this.defaultHexRecv,
+          config: meta?.config ?? defaultConfig,
+          hexSend: meta?.hexSend ?? defaultHexSend,
+          hexRecv: meta?.hexRecv ?? defaultHexRecv,
           recording: false,
           showTimestamp: meta?.showTimestamp ?? false,
           rts: meta?.rts ?? false,
@@ -497,19 +540,6 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
 <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
-  }
-}
-
-function applySetting(config: PortConfig, field: SettingField, value: string): PortConfig {
-  switch (field) {
-    case 'baudRate':
-      return { ...config, baudRate: Number(value) };
-    case 'dataBits':
-      return { ...config, dataBits: Number(value) as PortConfig['dataBits'] };
-    case 'parity':
-      return { ...config, parity: value as PortConfig['parity'] };
-    case 'stopBits':
-      return { ...config, stopBits: Number(value) as PortConfig['stopBits'] };
   }
 }
 
