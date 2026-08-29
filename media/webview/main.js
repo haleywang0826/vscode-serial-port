@@ -190,13 +190,15 @@
         <div class="session-body">
           ${renderConfigControls(prefix, session.config, true, !session.connected)}
           <div class="row checkboxes">
-            <div class="checkbox-line">
-              <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="rts" ${session.rts ? 'checked' : ''}> RTS</label>
-              <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="dtr" ${session.dtr ? 'checked' : ''}> DTR</label>
-            </div>
-            <div class="checkbox-line">
-              <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
-              <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Receive</label>
+            <div class="checkbox-grid">
+              <div class="checkbox-line">
+                <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="rts" ${session.rts ? 'checked' : ''}> RTS</label>
+                <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="dtr" ${session.dtr ? 'checked' : ''}> DTR</label>
+              </div>
+              <div class="checkbox-line">
+                <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
+                <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Receive</label>
+              </div>
             </div>
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''} ${session.connected ? '' : 'disabled title="Open the port to record"'}> Record to File</label>
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="showTimestamp" ${session.showTimestamp ? 'checked' : ''}> Show Timestamp</label>

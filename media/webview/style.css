@@ -91,10 +91,15 @@ h3 {
   gap: 2px;
 }
 
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: max-content max-content;
+  column-gap: 12px;
+  row-gap: 2px;
+}
+
 .checkbox-line {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  display: contents;
 }
 
 .row.port-row {
