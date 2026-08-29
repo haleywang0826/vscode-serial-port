@@ -113,8 +113,14 @@ button:disabled {
 }
 
 .icon-button {
-  padding: 2px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
   line-height: 1;
+  flex: none;
 }
 
 .log-line {
@@ -126,16 +132,19 @@ button:disabled {
 .session-card {
   border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
   border-radius: 3px;
-  padding: 8px;
-  margin-bottom: 8px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
 }
 
 .session-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
   word-break: break-all;
+}
+
+.session-body {
+  margin-top: 6px;
 }
 
 .session-actions {
@@ -162,6 +171,7 @@ button:disabled {
 
 .stats {
   margin-top: 4px;
+  font-size: 11px;
 }
 
 .muted {
@@ -169,12 +179,12 @@ button:disabled {
 }
 
 .truncate {
-  display: inline-block;
-  max-width: 160px;
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  vertical-align: bottom;
 }
 
 .template-row {

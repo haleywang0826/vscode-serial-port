@@ -140,27 +140,32 @@
     const body = collapsed
       ? ''
       : `
-        ${renderConfigControls(prefix, session.config, true, !session.connected)}
-        <div class="row checkboxes">
-          <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
-          <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Recv</label>
-          <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''} ${session.connected ? '' : 'disabled title="Open the port to record"'}> Record</label>
-        </div>
-        ${
-          session.logFilePath
-            ? `<div class="log-line muted truncate" title="${escapeHtml(session.logFilePath)}">
-                <span class="truncate">Logging to ${escapeHtml(session.logFilePath)}</span>
-                <button class="icon-button" data-action="open-log-file" data-path="${escapeHtml(session.logFilePath)}" title="Open log file">&#8599;</button>
-              </div>`
-            : ''
-        }
-        <div class="stats muted">TX: ${session.stats.bytesSent} bytes &nbsp; RX: ${session.stats.bytesReceived} bytes</div>`;
+        <div class="session-body">
+          ${renderConfigControls(prefix, session.config, true, !session.connected)}
+          <div class="row checkboxes">
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Recv</label>
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''} ${session.connected ? '' : 'disabled title="Open the port to record"'}> Record to file</label>
+          </div>
+          ${
+            session.logFilePath
+              ? `<div class="log-line muted">
+                  <span class="truncate" title="${escapeHtml(session.logFilePath)}">${escapeHtml(session.logFilePath)}</span>
+                  <button class="icon-button" data-action="open-log-file" data-path="${escapeHtml(session.logFilePath)}" title="Open log file">&#8599;</button>
+                </div>`
+              : ''
+          }
+          <div class="stats muted">TX: ${session.stats.bytesSent} bytes &nbsp; RX: ${session.stats.bytesReceived} bytes</div>
+        </div>`;
+    const toggleButton = session.connected
+      ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close port">&#9632;</button>`
+      : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open port">&#9658;</button>`;
     return `
       <div class="session-card">
         <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
           <strong>${chevron} ${escapeHtml(session.path)}</strong>${statusBadge}
           <div class="row session-actions">
-            <button class="toggle-button ${session.connected ? 'is-open' : 'is-closed'}" data-action="toggle-port" data-path="${escapeHtml(session.path)}">${session.connected ? 'Close' : 'Open'}</button>
+            ${toggleButton}
             <button class="icon-button" data-action="remove-session" data-path="${escapeHtml(session.path)}" title="Remove">&#10005;</button>
           </div>
         </div>
