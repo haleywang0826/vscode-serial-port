@@ -21,7 +21,7 @@ h3 {
 }
 
 .panel-section {
-  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-top: 1px solid var(--vscode-sideBarSectionHeader-border, var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35))));
 }
 
 .panel-section:first-child {
@@ -32,7 +32,7 @@ h3 {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 0;
+  padding: 8px 0;
 }
 
 .section-header > .icon-button {
@@ -54,16 +54,17 @@ h3 {
 
 .twisty::before {
   content: '';
-  width: 0;
-  height: 0;
+  width: 7px;
+  height: 7px;
   border-style: solid;
-  border-width: 4px 0 4px 5px;
-  border-color: transparent transparent transparent var(--vscode-icon-foreground, var(--vscode-foreground));
+  border-color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  border-width: 0 1.4px 1.4px 0;
+  transform: rotate(-45deg);
   transition: transform 0.1s ease;
 }
 
 .twisty.expanded::before {
-  transform: rotate(90deg);
+  transform: rotate(45deg);
 }
 
 .collapsible-header {
@@ -110,7 +111,7 @@ input:not([type]),
 textarea {
   background-color: var(--vscode-dropdown-background);
   color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
-  border: 1px solid var(--vscode-dropdown-border, var(--vscode-widget-border));
+  border: 1px solid var(--vscode-dropdown-border, var(--vscode-widget-border, rgba(128, 128, 128, 0.35)));
   border-radius: 2px;
   padding: 1px 4px;
   font-family: inherit;
@@ -165,7 +166,7 @@ button:disabled {
 }
 
 .session-card {
-  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
   border-radius: 3px;
   padding: 6px 8px;
   margin-bottom: 6px;
@@ -189,7 +190,7 @@ button:disabled {
 .toggle-button.is-closed {
   background-color: var(--vscode-button-secondaryBackground, transparent);
   color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
 }
 
 .toggle-button.is-closed:hover:not(:disabled) {
@@ -227,7 +228,7 @@ button:disabled {
   flex-direction: column;
   gap: 2px;
   padding: 4px 0;
-  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
 }
 
 .template-row-main {
@@ -265,5 +266,5 @@ button:disabled {
   flex-direction: column;
   gap: 4px;
   padding: 6px 0;
-  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
 }

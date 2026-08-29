@@ -140,13 +140,26 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   (`removeSession`) that drops it from `sessionOrder`/`closedMeta` for
   good. All four top-level sections — Port, Sessions, Send Templates,
   Default Settings — share one `.section-header.collapsible-header`
-  pattern: a rotating `.twisty` CSS-triangle (pure `border-*` trick, no
-  icon font/codicon dependency) plus a bold, normal-case `<h3>` title,
+  pattern: a rotating `.twisty` (two `border-*` edges of a small box, no
+  icon font/codicon dependency — a filled CSS triangle was tried first but
+  reads as a solid arrowhead rather than the thin two-stroke chevron VS
+  Code's codicons actually use) plus a bold, normal-case `<h3>` title,
   separated by a `.panel-section`'s top border rather than a bottom one so
   the divider always sits directly above the next title — matching how
-  VS Code's own Explorer draws the boundary between collapsible sections
-  (e.g. Outline/Timeline) rather than the initial uppercase-muted-11px
-  treatment this used before. Click anywhere on the header to fold.
+  VS Code's own Explorer/Extensions views draw the boundary between
+  collapsible sections rather than the initial uppercase-muted-11px
+  treatment this used before. That border color is
+  `--vscode-sideBarSectionHeader-border` (the exact token VS Code's own
+  sidebar section headers use) with a `rgba(128,128,128,0.35)` final
+  fallback — falling only as far as `--vscode-widget-border`/
+  `--vscode-panel-border` isn't enough because those two are sometimes
+  absent in a sidebar webview's injected variables, which made the
+  separator silently disappear (an invalid `var()` fallback chain drops
+  the whole declaration rather than falling back to a visible default);
+  the same `rgba` guard is applied everywhere else in this file that
+  borders on `--vscode-widget-border`/`--vscode-panel-border`
+  (session cards, dropdown borders, template row dividers) for the same
+  reason. Click anywhere on the header to fold.
   Port and Sessions default expanded, Send Templates and Default Settings
   default collapsed. The port picker itself is just a `<select>` plus a
   "+" icon button (`addPort`) that adds the selected path to
