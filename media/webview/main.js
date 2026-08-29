@@ -109,8 +109,8 @@
     return `
       <div class="row">
         <span class="muted truncate" title="${escapeHtml(folder ?? '')}">${escapeHtml(label ?? '')}</span>
-        ${lastState.logFolderIsCustom ? '<button class="icon-button" data-action="clear-log-folder" title="Reset to default log folder">&#10006;</button>' : ''}
-        <button class="icon-button" data-action="browse-log-folder" title="Change log folder">&#8230;</button>
+        ${lastState.logFolderIsCustom ? '<button class="icon-button" data-action="clear-log-folder" title="Reset to Default Log Folder">&#10006;</button>' : ''}
+        <button class="icon-button" data-action="browse-log-folder" title="Change Log Folder">&#8230;</button>
       </div>`;
   }
 
@@ -138,8 +138,8 @@
               <div class="section-body">
                 <div class="row">
                   <select id="port-select">${options}</select>
-                  <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to sessions">+</button>
-                  <button class="icon-button" data-action="refresh-ports" title="Refresh port list">&#8635;</button>
+                  <button class="icon-button" data-action="add-port" ${lastState.selectedPort ? '' : 'disabled'} title="Add to Sessions">+</button>
+                  <button class="icon-button" data-action="refresh-ports" title="Refresh Port List">&#8635;</button>
                 </div>
               </div>`
         }
@@ -149,7 +149,6 @@
   function renderSession(session) {
     const prefix = `session:${session.path}`;
     const collapsed = ui.collapsedSessions.has(session.path);
-    const chevron = collapsed ? '▸' : '▾';
     const statusBadge = session.connected ? '' : '<span class="status-closed">closed</span>';
     const body = collapsed
       ? ''
@@ -158,27 +157,31 @@
           ${renderConfigControls(prefix, session.config, true, !session.connected)}
           <div class="row checkboxes">
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexSend" ${session.hexSend ? 'checked' : ''}> Hex Send</label>
-            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Recv</label>
-            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''} ${session.connected ? '' : 'disabled title="Open the port to record"'}> Record to file</label>
-            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="showTimestamp" ${session.showTimestamp ? 'checked' : ''}> Show timestamp</label>
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Receive</label>
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''} ${session.connected ? '' : 'disabled title="Open the port to record"'}> Record to File</label>
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="showTimestamp" ${session.showTimestamp ? 'checked' : ''}> Show Timestamp</label>
           </div>
           ${
             session.logFilePath
               ? `<div class="log-line muted">
                   <span class="truncate" title="${escapeHtml(session.logFilePath)}">${escapeHtml(session.logFilePath)}</span>
-                  <button class="icon-button" data-action="open-log-file" data-path="${escapeHtml(session.logFilePath)}" title="Open log file">&#8599;</button>
+                  <button class="icon-button" data-action="open-log-file" data-path="${escapeHtml(session.logFilePath)}" title="Open Log File">&#8599;</button>
                 </div>`
               : ''
           }
           <div class="stats muted">TX: ${session.stats.bytesSent} bytes &nbsp; RX: ${session.stats.bytesReceived} bytes</div>
         </div>`;
     const toggleButton = session.connected
-      ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close port">&#9632;</button>`
-      : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open port">&#9658;</button>`;
+      ? `<button class="icon-button toggle-button is-open" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Close Port">&#9632;</button>`
+      : `<button class="icon-button toggle-button is-closed" data-action="toggle-port" data-path="${escapeHtml(session.path)}" title="Open Port">&#9658;</button>`;
     return `
       <div class="session-card">
         <div class="session-header collapsible-header" data-action="toggle-session" data-path="${escapeHtml(session.path)}">
-          <strong>${chevron} ${escapeHtml(session.path)}</strong>${statusBadge}
+          <div class="session-title">
+            <span class="twisty ${collapsed ? '' : 'expanded'}"></span>
+            <strong class="truncate">${escapeHtml(session.path)}</strong>
+            ${statusBadge}
+          </div>
           <div class="row session-actions">
             ${toggleButton}
             <button class="icon-button" data-action="remove-session" data-path="${escapeHtml(session.path)}" title="Remove">&#10006;</button>
@@ -264,7 +267,7 @@
           <div class="row template-actions">
             <button class="icon-button" data-action="send-template" data-id="${template.id}" ${sendDisabled} title="Send">&#9658;</button>
             <button class="icon-button" data-action="edit-template-toggle" data-id="${template.id}" title="Edit">&#9998;</button>
-            <button class="icon-button" data-action="delete-template" data-id="${template.id}" title="Delete">&#128465;</button>
+            <button class="icon-button" data-action="delete-template" data-id="${template.id}" title="Delete">&#128465;&#65038;</button>
           </div>
         </div>
       </div>`;
@@ -285,7 +288,7 @@
         <div class="section-header collapsible-header" data-action="toggle-templates">
           <span class="twisty ${ui.templatesCollapsed ? '' : 'expanded'}"></span>
           <h3>Send Templates</h3>
-          <button class="icon-button" data-action="add-template-toggle" title="Add template">+</button>
+          <button class="icon-button" data-action="add-template-toggle" title="Add Template">+</button>
         </div>
         ${body}
       </section>`;
@@ -316,7 +319,7 @@
                 ${renderConfigControls('default', lastState.defaultConfig, false, false)}
                 <div class="row checkboxes">
                   <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexSend" ${lastState.defaultHexSend ? 'checked' : ''}> Hex Send</label>
-                  <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexRecv" ${lastState.defaultHexRecv ? 'checked' : ''}> Hex Recv</label>
+                  <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexRecv" ${lastState.defaultHexRecv ? 'checked' : ''}> Hex Receive</label>
                 </div>
                 <div class="row">
                   <label>TX Color</label>

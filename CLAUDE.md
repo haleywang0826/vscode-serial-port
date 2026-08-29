@@ -134,8 +134,9 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   restored on reopen. `buildState()` builds each `PanelSession` (with a
   `connected: boolean` flag) from the live `PortConnection` when open, or
   from `closedMeta` (falling back to the defaults) when not. `main.js`
-  renders each session as its own bordered `.session-card` (chevron + path
-  in a `.session-header`, expanding into a `.session-body` underneath) with
+  renders each session as its own bordered `.session-card` (the same
+  `.twisty` chevron used by the top-level sections, plus path, in a
+  `.session-header`, expanding into a `.session-body` underneath) with
   an open/close toggle button (`togglePort`) plus a separate remove button
   (`removeSession`) that drops it from `sessionOrder`/`closedMeta` for
   good. All four top-level sections — Port, Sessions, Send Templates,
@@ -159,7 +160,13 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   the same `rgba` guard is applied everywhere else in this file that
   borders on `--vscode-widget-border`/`--vscode-panel-border`
   (session cards, dropdown borders, template row dividers) for the same
-  reason. Click anywhere on the header to fold.
+  reason. Click anywhere on the header to fold. Every action button in the
+  panel (`.icon-button` — add/refresh/toggle/remove/change-folder/
+  template actions) is a flat, borderless 22×22 glyph button matching VS
+  Code's own toolbar icons (e.g. the Search view's refresh/filter icons) —
+  transparent by default, with a `--vscode-toolbar-hoverBackground` tint
+  on hover — rather than a filled `--vscode-button-background` pill, which
+  is reserved for real primary actions (Send Templates' Save/Cancel).
   Port and Sessions default expanded, Send Templates and Default Settings
   default collapsed. The port picker itself is just a `<select>` plus a
   "+" icon button (`addPort`) that adds the selected path to

@@ -179,6 +179,19 @@ button:disabled {
   padding: 0;
   line-height: 1;
   flex: none;
+  background: none;
+  color: var(--vscode-icon-foreground, var(--vscode-foreground));
+  border: none;
+  border-radius: 5px;
+  font-weight: 600;
+}
+
+.icon-button:hover:not(:disabled) {
+  background-color: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.25));
+}
+
+.icon-button:active:not(:disabled) {
+  background-color: var(--vscode-toolbar-activeBackground, rgba(128, 128, 128, 0.35));
 }
 
 .log-line {
@@ -198,6 +211,15 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 6px;
+}
+
+.session-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
   word-break: break-all;
 }
 
@@ -207,16 +229,6 @@ button:disabled {
 
 .session-actions {
   margin-bottom: 0;
-}
-
-.toggle-button.is-closed {
-  background-color: var(--vscode-button-secondaryBackground, transparent);
-  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-  border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.35)));
-}
-
-.toggle-button.is-closed:hover:not(:disabled) {
-  background-color: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
 }
 
 .status-closed {
