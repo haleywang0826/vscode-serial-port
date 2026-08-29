@@ -16,8 +16,8 @@
     defaultHexRecv: false,
     txColor: '#00cccc',
     rxColor: '#33cc33',
-    logFolder: '',
-    logFolderIsCustom: false,
+    saveLogAt: '${workspaceFolder}/serial_logs',
+    saveLogAtIsCustom: false,
     sessions: [],
     templates: [],
   };
@@ -30,6 +30,7 @@
     editingTemplateId: null,
     editTemplateDraft: { name: '', format: 'hex', data: '' },
     customBaud: {},
+    advancedCollapsed: {},
     portCollapsed: false,
     sessionsCollapsed: false,
     defaultSettingsCollapsed: true,
@@ -99,6 +100,7 @@
     const showCustomBaud = ui.customBaud[prefix] || !BAUD_RATE_PRESETS.includes(config.baudRate);
     const lockedAttrs = locked ? 'disabled title="Reopen the port to change this"' : '';
     const baudLockedAttrs = lockBaud ? 'disabled title="Reopen the port to change this"' : '';
+    const advancedCollapsed = ui.advancedCollapsed[prefix] !== false;
     return `
       <div class="config-grid">
         <label>Baud Rate</label>
@@ -116,6 +118,16 @@
               : ''
           }
         </div>
+      </div>
+      <div class="section-header collapsible-header advanced-toggle" data-action="toggle-advanced" data-prefix="${prefix}">
+        <span class="twisty ${advancedCollapsed ? '' : 'expanded'}"></span>
+        <span class="muted">Advanced</span>
+      </div>
+      ${
+        advancedCollapsed
+          ? ''
+          : `
+      <div class="config-grid">
         <label>Data Bits</label>
         <select data-action="setting" data-prefix="${prefix}" data-field="dataBits" ${lockedAttrs}>
           ${DATA_BITS_OPTIONS.map(
@@ -135,16 +147,19 @@
             (bits) => `<option value="${bits}" ${config.stopBits === bits ? 'selected' : ''}>${bits}</option>`,
           ).join('')}
         </select>
-      </div>`;
+      </div>`
+      }`;
   }
 
   function renderLogFolderRow() {
-    const folder = lastState.logFolder;
-    const label = lastState.logFolderIsCustom ? folder : `Using: ${folder}`;
+    const saveLogAt = lastState.saveLogAt;
     return `
       <div class="row">
-        <span class="muted truncate" title="${escapeHtml(folder ?? '')}">${escapeHtml(label ?? '')}</span>
-        ${lastState.logFolderIsCustom ? '<button class="icon-button" data-action="clear-log-folder" title="Reset to Default Log Folder"><i class="codicon codicon-discard"></i></button>' : ''}
+        <label>Save log at</label>
+      </div>
+      <div class="row">
+        <span class="muted truncate" title="${escapeHtml(saveLogAt ?? '')}">${escapeHtml(saveLogAt ?? '')}</span>
+        ${lastState.saveLogAtIsCustom ? '<button class="icon-button" data-action="clear-log-folder" title="Reset to Default"><i class="codicon codicon-discard"></i></button>' : ''}
         <button class="icon-button" data-action="browse-log-folder" title="Change Log Folder"><i class="codicon codicon-folder-opened"></i></button>
       </div>`;
   }
@@ -164,7 +179,7 @@
       <section class="panel-section">
         <div class="section-header collapsible-header" data-action="toggle-port-section">
           <span class="twisty ${ui.portCollapsed ? '' : 'expanded'}"></span>
-          <h3>Port</h3>
+          <h3>Ports</h3>
         </div>
         ${
           ui.portCollapsed
@@ -358,7 +373,7 @@
               <div class="section-body">
                 ${renderLogFolderRow()}
                 ${renderConfigControls('default', lastState.defaultConfig, false, false)}
-                <div class="row checkboxes">
+                <div class="row">
                   <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexSend" ${lastState.defaultHexSend ? 'checked' : ''}> Hex Send</label>
                   <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexRecv" ${lastState.defaultHexRecv ? 'checked' : ''}> Hex Receive</label>
                 </div>
@@ -516,6 +531,12 @@
         ui.portCollapsed = !ui.portCollapsed;
         render();
         break;
+      case 'toggle-advanced': {
+        const prefix = el.dataset.prefix;
+        ui.advancedCollapsed[prefix] = !(ui.advancedCollapsed[prefix] !== false);
+        render();
+        break;
+      }
       case 'toggle-sessions-section':
         ui.sessionsCollapsed = !ui.sessionsCollapsed;
         render();

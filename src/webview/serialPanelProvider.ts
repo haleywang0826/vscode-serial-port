@@ -8,6 +8,8 @@ import { SendFormat, TemplateStore } from '../templates/templateStore';
 const REFRESH_DEBOUNCE_MS = 150;
 const DEFAULT_TX_COLOR = '#00cccc';
 const DEFAULT_RX_COLOR = '#33cc33';
+const WORKSPACE_FOLDER_TOKEN = '${workspaceFolder}';
+const DEFAULT_SAVE_LOG_AT = `${WORKSPACE_FOLDER_TOKEN}/serial_logs`;
 
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
 type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp' | 'rts' | 'dtr';
@@ -69,8 +71,8 @@ interface PanelState {
   defaultHexRecv: boolean;
   txColor: string;
   rxColor: string;
-  logFolder: string;
-  logFolderIsCustom: boolean;
+  saveLogAt: string;
+  saveLogAtIsCustom: boolean;
   sessions: PanelSession[];
   templates: ReturnType<TemplateStore['list']>;
 }
@@ -241,7 +243,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         break;
       case 'clearLogFolder':
         void this.config()
-          .update('logFolder', undefined, vscode.ConfigurationTarget.Global)
+          .update('saveLogAt', undefined, vscode.ConfigurationTarget.Global)
           .then(() => this.postState());
         break;
       case 'openLogFile':
@@ -357,7 +359,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     if (!picked || picked.length === 0) {
       return;
     }
-    await this.config().update('logFolder', picked[0].fsPath, vscode.ConfigurationTarget.Global);
+    await this.config().update('saveLogAt', picked[0].fsPath, vscode.ConfigurationTarget.Global);
     this.postState();
   }
 
@@ -374,12 +376,20 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
   }
 
   private resolveLogFolderUri(): vscode.Uri {
-    const logFolder = this.config().get<string>('logFolder', '').trim();
-    if (logFolder) {
-      return vscode.Uri.file(logFolder);
+    const raw = this.config().get<string>('saveLogAt', DEFAULT_SAVE_LOG_AT).trim();
+    const tokenIndex = raw.indexOf(WORKSPACE_FOLDER_TOKEN);
+    if (tokenIndex !== -1) {
+      // Uri.joinPath (not a fsPath string round-trip) so a `vscode-remote://wsl+...` workspace
+      // folder URI keeps its scheme — this is what keeps the log file inside the WSL filesystem
+      // rather than silently reinterpreting it as a local Windows path.
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.defaultStorageUri;
+      const remainder = raw
+        .slice(tokenIndex + WORKSPACE_FOLDER_TOKEN.length)
+        .split(/[/\\]+/)
+        .filter(Boolean);
+      return vscode.Uri.joinPath(workspaceRoot, ...remainder);
     }
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri ?? this.defaultStorageUri;
-    return vscode.Uri.joinPath(workspaceRoot, 'serial logs');
+    return vscode.Uri.file(raw);
   }
 
   private setCheckbox(path: string, checkbox: SessionCheckbox, value: boolean): void {
@@ -484,8 +494,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       defaultHexRecv,
       txColor: this.terminalColors.tx,
       rxColor: this.terminalColors.rx,
-      logFolder: this.resolveLogFolderUri().fsPath,
-      logFolderIsCustom: this.config().get<string>('logFolder', '').trim().length > 0,
+      saveLogAt: this.config().get<string>('saveLogAt', DEFAULT_SAVE_LOG_AT),
+      saveLogAtIsCustom: this.config().get<string>('saveLogAt', DEFAULT_SAVE_LOG_AT).trim() !== DEFAULT_SAVE_LOG_AT,
       sessions: this.sessionOrder.map((path) => {
         const connection = this.connections.get(path);
         if (connection) {

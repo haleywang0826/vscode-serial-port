@@ -43,7 +43,7 @@
         {
           "type": "webview",
           "id": "serialPortExplorer",
-          "name": "Ports"
+          "name": ""
         }
       ]
     },
@@ -83,10 +83,10 @@
           "default": false,
           "description": "Default Hex Receive state used when a newly added port is opened."
         },
-        "serialPort.logFolder": {
+        "serialPort.saveLogAt": {
           "type": "string",
-          "default": "",
-          "description": "Folder to write serial session log files to. When empty, defaults to '<workspace root>/serial logs', falling back to the extension's global storage folder when no workspace is open."
+          "default": "${workspaceFolder}/serial_logs",
+          "description": "Folder to write serial session log files to. The literal ${workspaceFolder} token is resolved to the first workspace folder at log-write time (falling back to the extension's global storage folder when no workspace is open); any other value is used as-is as an absolute path."
         },
         "serialPort.txColor": {
           "type": "string",
@@ -97,6 +97,30 @@
           "type": "string",
           "default": "#33cc33",
           "description": "Terminal color for received (RX) bytes, as a CSS hex color."
+        },
+        "serialPort.sendTemplates": {
+          "type": "array",
+          "default": [],
+          "description": "Reusable send templates shown in the Send Templates panel section.",
+          "items": {
+            "type": "object",
+            "required": ["id", "name", "format", "data"],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "format": {
+                "type": "string",
+                "enum": ["hex", "ascii"]
+              },
+              "data": {
+                "type": "string"
+              }
+            }
+          }
         }
       }
     },

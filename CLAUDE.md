@@ -54,7 +54,12 @@ Windows while logs/templates/terminal output land in the user's real
 workspace (e.g. the WSL filesystem). When implementing the serial connection
 manager, log persistence, and terminal/monitor view, rely on these
 `vscode.*` APIs rather than Node's raw `fs`/`child_process`, or this
-WSL-transparency property breaks.
+WSL-transparency property breaks. This holds with zero manual user
+configuration: opening a WSL-remote window and adding a physical Windows
+COM port just works, and recording a session with the default
+`serialPort.saveLogAt` (`${workspaceFolder}/serial_logs`, see Recording
+below) writes the log file into that remote workspace's own filesystem,
+not onto the Windows host.
 
 Serial I/O uses the `serialport` npm package (prebuilt native bindings for
 win32/darwin/linux, x64+arm64) so packaging never requires a native build
@@ -153,7 +158,7 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   on `:first-child`) rather than a full border/box — the same divider
   treatment `.panel-section` uses between the four top-level sections —
   so a stack of session cards reads as one continuous list instead of a
-  stack of separate boxes. All four top-level sections — Port, Sessions,
+  stack of separate boxes. All four top-level sections — Ports, Sessions,
   Send Templates, Default Settings — share one
   `.section-header.collapsible-header` pattern: a rotating `.twisty` (two
   `border-*` edges of a small box — a filled CSS triangle was tried first
@@ -211,7 +216,11 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   border width would inflate that button's box and throw off the
   flex-centered icon glyph relative to the row it sits in.
   Port and Sessions default expanded, Send Templates and Default Settings
-  default collapsed. The port picker itself is just a `<select>` plus an
+  default collapsed. `contributes.views.serialPort[0].name` in `package.json`
+  is left `""` — VS Code appends `": <view name>"` to a single-view
+  container's sidebar header when the view has a non-empty name, so a blank
+  name keeps the header as just "Serial Port" instead of "Serial Port:
+  Ports". The port picker itself is just a `<select>` plus an
   add-port icon button (`addPort`) that adds the selected path to
   `sessionOrder` and opens it. `media/webview/main.js` is vanilla
   JS with no framework or bundler — it does a full DOM re-render from that
@@ -232,10 +241,11 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   that button's box and throw off the flex-centered icon glyph relative to
   the row it sits in.
   Default Settings (baud/data bits/parity/stop bits/hex send/hex recv
-  defaults), Log Folder, and TX/RX Terminal Colors are all real
-  `contributes.configuration` entries (`serialPort.default*`,
-  `serialPort.logFolder`, `serialPort.txColor`, `serialPort.rxColor` — see
-  `package.json`), not `context.globalState` or in-memory fields, so they
+  defaults), Save Log At, TX/RX Terminal Colors, and Send Templates are all
+  real `contributes.configuration` entries (`serialPort.default*`,
+  `serialPort.saveLogAt`, `serialPort.txColor`, `serialPort.rxColor`,
+  `serialPort.sendTemplates` — see `package.json`), not `context.globalState`
+  or in-memory fields, so they
   get native User/Workspace/Folder scoping through VS Code's own Settings
   UI/`settings.json` for free. `SerialPanelProvider` reads them via
   `vscode.workspace.getConfiguration('serialPort')` on every `buildState()`
@@ -245,7 +255,8 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   setting changes out-of-panel (Settings UI, hand-edited `settings.json`,
   or a Workspace-level `.vscode/settings.json`). The panel's own controls
   (Default Settings fields/checkboxes, log-folder browse/reset buttons,
-  TX/RX color pickers) always write via `config.update(key, value,
+  TX/RX color pickers, Send Templates add/edit/delete) always write via
+  `config.update(key, value,
   vscode.ConfigurationTarget.Global)` — i.e. every in-panel edit targets
   User scope, since the panel itself has no scope picker; a user who wants
   a workspace-specific override sets it through Settings UI's Workspace
@@ -254,8 +265,18 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
   reference passed into every open terminal (see `TerminalColors` below)
   keeps working after a config-driven color change — only its `.tx`/`.rx`
   properties are mutated in place.
+
+  `renderConfigControls(prefix, config, locked, lockBaud)` in `main.js`
+  (shared by Default Settings and every session card) only ever shows Baud
+  Rate at the top level — Data Bits/Parity/Stop Bits sit behind their own
+  small collapsible "Advanced" sub-header (`ui.advancedCollapsed[prefix]`,
+  reusing the same `.twisty` chevron), collapsed by default for every
+  prefix including brand-new sessions (a missing map entry reads as
+  collapsed), since those three fields are rarely touched day-to-day.
 - `templates/templateStore.ts` — CRUD for send templates over
-  `context.globalState` (global, not workspace-scoped).
+  `serialPort.sendTemplates` (a `contributes.configuration` array setting,
+  User-scoped like the other Default Settings — see above), not
+  `context.globalState`.
 
 Recording a session's traffic writes to an auto-named log file
 (`<port>_<ISO timestamp>.log`, one full ISO-8601 date-time per line) via
@@ -263,15 +284,28 @@ debounced `vscode.workspace.fs.writeFile` calls in `PortConnection` — never
 raw Node `fs`, to preserve the WSL-transparency property described above.
 There's no `OutputChannel` view for this anymore: the terminal already
 shows the same live TX/RX traffic, so a second live view would be
-redundant. The destination folder defaults to `<workspace root>/serial
-logs` (auto-created via `vscode.workspace.fs.createDirectory`), falling
-back to the extension's `context.globalStorageUri` when no workspace
-folder is open; a custom "Log Folder" override (the `serialPort.logFolder`
-setting, browsed via `vscode.window.showOpenDialog`) takes priority over
-that default when set. Turning Record off flushes and keeps
+redundant. The destination folder is controlled by the `serialPort.saveLogAt`
+setting, default `"${workspaceFolder}/serial_logs"`: `resolveLogFolderUri()`
+substitutes the literal `${workspaceFolder}` token for the first workspace
+folder's URI via `vscode.Uri.joinPath` (falling back to the extension's
+`context.globalStorageUri` when no workspace is open) rather than treating
+it as a fsPath string round-trip — `Uri.joinPath` is what keeps a
+`vscode-remote://wsl+...` workspace folder's scheme intact, so a log
+started with the default setting under a WSL-remote window lands inside
+the WSL filesystem, not reinterpreted as a local Windows path. Any other
+`saveLogAt` value (e.g. one picked via "Browse…") is treated as a literal
+absolute path (`vscode.Uri.file`) and used as-is. VS Code does not
+auto-substitute `${workspaceFolder}`-style tokens in generic configuration
+properties (unlike `launch.json`/`tasks.json`), so this substitution is
+hand-rolled; critically, the panel displays the **raw, unresolved**
+`saveLogAt` string (e.g. `${workspaceFolder}/serial_logs`), not the
+resolved directory — this is what keeps the setting portable across
+machines/OSes/WSL rather than baking in one machine's absolute path.
+Turning Record off flushes and keeps
 the file path around (rather than clearing it) so the panel can still show
 and open the completed log — each session card has an icon button that
 opens its current log file via `vscode.window.showTextDocument`.
+
 
 ## Publishing
 

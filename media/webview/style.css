@@ -123,6 +123,25 @@ h3 {
   margin-bottom: 8px;
 }
 
+.advanced-toggle {
+  padding: 2px 0 6px;
+  gap: 4px;
+}
+
+.advanced-toggle .twisty {
+  width: 14px;
+  height: 14px;
+}
+
+.advanced-toggle .twisty::before {
+  width: 6px;
+  height: 6px;
+}
+
+.advanced-toggle .muted {
+  font-size: 11px;
+}
+
 .config-grid label {
   color: var(--vscode-descriptionForeground);
 }

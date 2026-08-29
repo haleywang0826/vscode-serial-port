@@ -6,7 +6,7 @@ import { SerialPanelProvider } from './webview/serialPanelProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
   const connections = new ConnectionManager();
-  const templates = new TemplateStore(context.globalState);
+  const templates = new TemplateStore();
   const terminals = new Map<string, SerialTerminal>();
   const panelProvider = new SerialPanelProvider(
     context.extensionUri,
