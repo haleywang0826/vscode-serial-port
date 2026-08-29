@@ -73,11 +73,26 @@ and `node_modules/@serialport` must physically ship inside the `.vsix`.
 - `serial/pseudoterminal.ts` — the interactive per-port terminal: a
   `vscode.Pseudoterminal` that echoes/buffers typed input itself (ptys don't
   echo), rejects non-hex keystrokes while hex-send is on, and sends on Enter.
-- `tree/serialTreeProvider.ts` + `tree/treeItems.ts` — the
-  `TreeDataProvider` behind the Activity Bar view: port picker, default
-  settings, one collapsible section per open session, and send templates.
-  Node kinds and `contextValue`s are what `package.json`'s
-  `view/item/context` menu `when` clauses key off of for inline buttons.
+- `webview/serialPanelProvider.ts` + `media/webview/{main.js, style.css}` —
+  the Activity Bar view is a `vscode.WebviewViewProvider`, not a
+  `TreeDataProvider`. It was a tree view originally, but `TreeItem` can't
+  anchor a dropdown to its own row (`showQuickPick` always opens as a
+  floating overlay) or keep inline row buttons visible outside hover/focus —
+  both were hard requirements, so the presentation layer moved to a webview
+  where a real `<select>` and `<button>` do both for free.
+  `serialPanelProvider.ts` builds the nonce/CSP-gated HTML, serializes all
+  panel state (ports, selected port, default config, open sessions,
+  templates) via `buildState()`, and pushes it to the webview as
+  `{type: 'state', state}` on resolve, on visibility change, on an explicit
+  `refreshPorts` message, and (debounced 150ms) whenever
+  `ConnectionManager.onDidChange` fires. `media/webview/main.js` is vanilla
+  JS with no framework or bundler — it does a full DOM re-render from that
+  state on every message and posts action messages back
+  (`selectPort`, `openPort`, `closePort`, `refreshPorts`,
+  `updateDefaultSetting`, `updateSessionBaudRate`, `setCheckbox`,
+  `addTemplate`, `updateTemplate`, `deleteTemplate`, `sendTemplate`); it
+  keeps in-progress form edits in local JS state (not the pushed state) so
+  an unrelated push (e.g. another port's byte counter) can't clobber them.
 - `templates/templateStore.ts` — CRUD for send templates over
   `context.globalState` (global, not workspace-scoped).
 
