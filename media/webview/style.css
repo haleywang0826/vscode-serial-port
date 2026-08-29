@@ -91,6 +91,12 @@ h3 {
   gap: 2px;
 }
 
+.checkbox-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .row.port-row {
   flex-wrap: nowrap;
 }
