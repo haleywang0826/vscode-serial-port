@@ -51,6 +51,45 @@ export function formatBytesForTerminal(data: Uint8Array, hex: boolean): string {
 }
 
 /**
+ * Scans the tail of `data` for a possible-incomplete `ESC [ ... ` (CSI) sequence — one that starts
+ * before the end of the chunk but hasn't yet reached a final byte (0x40-0x7e) — and splits it off
+ * as `pending`. This is what lets an SGR color sequence render correctly even when the underlying
+ * `serialport` `'data'` event splits it across two reads: the caller holds `pending` back and
+ * prepends it to the next chunk before calling `bytesToAsciiForTerminal` again, instead of feeding
+ * each half to `bytesToAsciiForTerminal` independently (which would render each half as un-colored
+ * garbage). Only scans the last 32 bytes, since a real SGR sequence is always short.
+ */
+export function splitTrailingEscape(data: Uint8Array): { complete: Uint8Array; pending: Uint8Array } {
+  const searchFrom = Math.max(0, data.length - 32);
+  for (let start = data.length - 1; start >= searchFrom; start--) {
+    if (data[start] !== ESC) {
+      continue;
+    }
+    if (start + 1 >= data.length) {
+      return { complete: data.slice(0, start), pending: data.slice(start) }; // lone trailing ESC
+    }
+    if (data[start + 1] !== 0x5b /* '[' */) {
+      break; // not a CSI sequence; nothing to carry
+    }
+    let j = start + 2;
+    while (j < data.length && data[j] >= 0x30 && data[j] <= 0x3f) j++; // parameter bytes
+    while (j < data.length && data[j] >= 0x20 && data[j] <= 0x2f) j++; // intermediate bytes
+    if (j >= data.length) {
+      return { complete: data.slice(0, start), pending: data.slice(start) }; // no final byte yet
+    }
+    break; // sequence already resolved within this chunk
+  }
+  return { complete: data, pending: new Uint8Array(0) };
+}
+
+export function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+/**
  * Parses a hex-mode send line ("0A FF 3C" or "0AFF3C") into bytes. An odd number of digits is
  * padded with a trailing 0 (e.g. "0A3" -> "0A 30") rather than rejected, since a user who stops
  * mid-byte almost always means the low nibble to be 0, not an error to correct.

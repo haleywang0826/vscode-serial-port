@@ -203,7 +203,7 @@
       ? ''
       : `
         <div class="session-body">
-          ${renderConfigControls(prefix, session.config, true, !session.connected)}
+          ${renderConfigControls(prefix, session.config, session.connected, false)}
           <div class="row checkboxes">
             <div class="checkbox-grid">
               <div class="checkbox-line">
@@ -427,6 +427,13 @@
           type: 'updateSessionBaudRate',
           path: prefix.slice('session:'.length),
           baudRate: Number(el.value),
+        });
+      } else if (prefix.startsWith('session:')) {
+        postMessage({
+          type: 'updateSessionSetting',
+          path: prefix.slice('session:'.length),
+          field,
+          value: el.value,
         });
       }
       return;

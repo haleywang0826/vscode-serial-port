@@ -32,6 +32,15 @@ export interface TrafficEvent {
 }
 
 const LOG_FLUSH_DEBOUNCE_MS = 300;
+/** Once a segment file reaches this size, the next flush starts a fresh file instead of
+ * continuing to grow the same buffer forever — `vscode.workspace.fs.writeFile` has no append
+ * option (it always replaces full file contents), so the alternative is rewriting the *entire*
+ * session's log on every flush, an unbounded and ever-growing cost. */
+const LOG_ROTATE_BYTES = 4 * 1024 * 1024;
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 /** ISO-8601 formatted in the system's local timezone with its offset (unlike
  * `Date.prototype.toISOString()`, which always renders UTC), e.g. "2026-08-29T14:23:01.123+08:00". */
@@ -67,9 +76,12 @@ export class PortConnection {
 
   private readonly port: SerialPort;
   private logFileUri: vscode.Uri | undefined;
+  private logFolderUri: vscode.Uri | undefined;
   private logBuffer = '';
   private logFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private logFlushChain: Promise<void> = Promise.resolve();
+  private logDirReady: Promise<void> = Promise.resolve();
+  private controlLineChain: Promise<void> = Promise.resolve();
 
   private readonly onDidTrafficEmitter = new vscode.EventEmitter<TrafficEvent>();
   /** Fires for every TX (typed or template-sent) and RX event, so any live view always sees
@@ -163,10 +175,14 @@ export class PortConnection {
   setRecording(value: boolean, logFolderUri?: vscode.Uri): void {
     this.recording = value;
     if (value && logFolderUri) {
-      void vscode.workspace.fs.createDirectory(logFolderUri).then(undefined, (err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`Failed to create log folder: ${message}`);
-      });
+      this.logFolderUri = logFolderUri;
+      this.logDirReady = (async () => {
+        try {
+          await vscode.workspace.fs.createDirectory(logFolderUri);
+        } catch (err) {
+          vscode.window.showErrorMessage(`Failed to create log folder: ${errorMessage(err)}`);
+        }
+      })();
       this.logFileUri = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
       this.logBuffer = '';
     } else if (!value) {
@@ -181,17 +197,28 @@ export class PortConnection {
   }
 
   /** `SerialPort#set()` applies its own defaults to any flag not passed in a given call (not the
-   * port's current state), so RTS and DTR must always be set together or one silently resets. */
+   * port's current state), so RTS and DTR must always be set together or one silently resets.
+   * Calls are chained onto `controlLineChain` so two concurrent `setRTS`/`setDTR` calls can't each
+   * read a stale snapshot of the other pin and race — the same serialization pattern `logFlushChain`
+   * already uses below. */
   setRTS(value: boolean): Promise<void> {
-    return this.setControlLines({ rts: value, dtr: this.dtr }).then(() => {
-      this.rts = value;
-    });
+    return this.queueControlLines({ rts: value });
   }
 
   setDTR(value: boolean): Promise<void> {
-    return this.setControlLines({ rts: this.rts, dtr: value }).then(() => {
-      this.dtr = value;
+    return this.queueControlLines({ dtr: value });
+  }
+
+  private queueControlLines(patch: { rts?: boolean; dtr?: boolean }): Promise<void> {
+    const next = this.controlLineChain.then(() => {
+      const flags = { rts: patch.rts ?? this.rts, dtr: patch.dtr ?? this.dtr };
+      return this.setControlLines(flags).then(() => {
+        this.rts = flags.rts;
+        this.dtr = flags.dtr;
+      });
     });
+    this.controlLineChain = next.catch(() => {});
+    return next;
   }
 
   private setControlLines(flags: { rts: boolean; dtr: boolean }): Promise<void> {
@@ -219,6 +246,11 @@ export class PortConnection {
     this.flushLogFile();
     if (this.logFlushTimer) {
       clearTimeout(this.logFlushTimer);
+    }
+    if (this.port.isOpen) {
+      this.port.close(() => {
+        /* best-effort native handle release on teardown */
+      });
     }
     this.onDidTrafficEmitter.dispose();
     this.onDidCloseEmitter.dispose();
@@ -263,17 +295,27 @@ export class PortConnection {
     const uri = this.logFileUri;
     const content = Buffer.from(this.logBuffer, 'utf8');
     this.logFlushChain = this.logFlushChain
+      .then(() => this.logDirReady)
       .then(() => vscode.workspace.fs.writeFile(uri, content))
       .catch((err) => {
-        const message = err instanceof Error ? err.message : String(err);
-        vscode.window.showErrorMessage(`Failed to write serial log file: ${message}`);
+        vscode.window.showErrorMessage(`Failed to write serial log file: ${errorMessage(err)}`);
       });
+    if (content.byteLength >= LOG_ROTATE_BYTES && this.logFolderUri) {
+      // Start a fresh segment so future flushes don't need to resend everything written so far.
+      this.logFileUri = vscode.Uri.joinPath(this.logFolderUri, buildLogFileName(this.path));
+      this.logBuffer = '';
+    }
   }
 }
 
 /** Registry of currently-open ports, keyed by device path. */
 export class ConnectionManager {
   private readonly connections = new Map<string, PortConnection>();
+  /** In-flight `open()` calls per path — lets a second concurrent `open(path, ...)` call converge
+   * onto the same connection instead of racing to construct/open a duplicate native `SerialPort`
+   * for the same device (both callers would otherwise see `isOpen(path) === false` until the
+   * first one's `await connection.open()` resolves and registers it). */
+  private readonly opening = new Map<string, Promise<PortConnection>>();
 
   private readonly onDidChangeEmitter = new vscode.EventEmitter<void>();
   readonly onDidChange = this.onDidChangeEmitter.event;
@@ -295,17 +337,29 @@ export class ConnectionManager {
     if (existing) {
       return existing;
     }
-    const connection = new PortConnection(path, config);
-    await connection.open();
-    connection.onDidUpdate(() => this.onDidChangeEmitter.fire());
-    connection.onDidClose(() => {
-      this.connections.delete(path);
-      connection.dispose();
+    const inFlight = this.opening.get(path);
+    if (inFlight) {
+      return inFlight;
+    }
+    const openPromise = (async () => {
+      const connection = new PortConnection(path, config);
+      try {
+        await connection.open();
+      } finally {
+        this.opening.delete(path);
+      }
+      connection.onDidUpdate(() => this.onDidChangeEmitter.fire());
+      connection.onDidClose(() => {
+        this.connections.delete(path);
+        connection.dispose();
+        this.onDidChangeEmitter.fire();
+      });
+      this.connections.set(path, connection);
       this.onDidChangeEmitter.fire();
-    });
-    this.connections.set(path, connection);
-    this.onDidChangeEmitter.fire();
-    return connection;
+      return connection;
+    })();
+    this.opening.set(path, openPromise);
+    return openPromise;
   }
 
   async close(path: string): Promise<void> {

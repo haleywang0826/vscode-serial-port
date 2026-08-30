@@ -10,6 +10,11 @@ const DEFAULT_TX_COLOR = '#00cccc';
 const DEFAULT_RX_COLOR = '#33cc33';
 const WORKSPACE_FOLDER_TOKEN = '${workspaceFolder}';
 const DEFAULT_SAVE_LOG_AT = `${WORKSPACE_FOLDER_TOKEN}/serial_logs`;
+/** `context.globalState` keys — global (not workspace) scope because physical device paths are
+ * machine-specific, not tied to any one workspace; local-only by default (no `setKeysForSync`
+ * call), so this introduces no new sync/cloud exposure of session data. */
+const SESSION_ORDER_KEY = 'serialPort.sessionOrder';
+const CLOSED_META_KEY = 'serialPort.closedMeta';
 
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
 type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp' | 'rts' | 'dtr';
@@ -27,6 +32,7 @@ type ClientMessage =
   | { type: 'updateDefaultCheckbox'; checkbox: DefaultCheckbox; value: boolean }
   | { type: 'updateTerminalColor'; which: TerminalColorKey; value: string }
   | { type: 'updateSessionBaudRate'; path: string; baudRate: number }
+  | { type: 'updateSessionSetting'; path: string; field: 'dataBits' | 'parity' | 'stopBits'; value: string }
   | { type: 'setCheckbox'; path: string; checkbox: SessionCheckbox; value: boolean }
   | { type: 'addTemplate'; name: string; format: SendFormat; data: string }
   | { type: 'updateTemplate'; id: string; name: string; format: SendFormat; data: string }
@@ -97,6 +103,10 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
   /** Settings snapshot for a session whose port is currently closed, so the card can still show
    * (and reopen with) its last-known config/hex/log state. */
   private readonly closedMeta = new Map<string, StoredSessionMeta>();
+  /** Paths currently mid-`openPath` — guards a second `togglePort`/`addPort` message for the same
+   * path from re-running the whole open sequence (creating a duplicate terminal, re-asserting
+   * RTS/DTR twice) while the first call's `connections.open()` is still in flight. */
+  private readonly openingPaths = new Set<string>();
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
 
@@ -106,7 +116,13 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     private readonly templates: TemplateStore,
     private readonly terminals: Map<string, SerialTerminal>,
     private readonly defaultStorageUri: vscode.Uri,
+    private readonly globalState: vscode.Memento,
   ) {
+    this.sessionOrder = this.globalState.get<string[]>(SESSION_ORDER_KEY, []);
+    const storedMeta = this.globalState.get<Record<string, StoredSessionMeta>>(CLOSED_META_KEY, {});
+    for (const [path, meta] of Object.entries(storedMeta)) {
+      this.closedMeta.set(path, meta);
+    }
     this.subscriptions.push(connections.onDidChange(() => this.scheduleStateRefresh()));
     this.subscriptions.push(connections.onDidChange(() => this.pruneClosedTerminals()));
     this.terminalColors.tx = this.config().get<string>('txColor', DEFAULT_TX_COLOR);
@@ -146,6 +162,30 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
 
   private getDefaultHexRecv(): boolean {
     return this.config().get<boolean>('defaultHexRecv', false);
+  }
+
+  /** Persists `sessionOrder`/`closedMeta` to `globalState` so both survive an extension-host
+   * restart (window reload, VS Code update, crash) instead of being wiped every time. */
+  private persistSessions(): void {
+    void this.globalState.update(SESSION_ORDER_KEY, this.sessionOrder);
+    void this.globalState.update(CLOSED_META_KEY, Object.fromEntries(this.closedMeta));
+  }
+
+  /** Builds a `closedMeta` snapshot for a session that has no live connection to read from —
+   * either because it just closed (in which case fresh values are passed) or because its very
+   * first open attempt failed (in which case `previous`, if any, is reused so a retry doesn't
+   * lose settings the user already edited on this card before the failed open). */
+  private buildFallbackMeta(config: PortConfig, previous: StoredSessionMeta | undefined): StoredSessionMeta {
+    return {
+      config,
+      hexSend: previous?.hexSend ?? this.getDefaultHexSend(),
+      hexRecv: previous?.hexRecv ?? this.getDefaultHexRecv(),
+      showTimestamp: previous?.showTimestamp ?? false,
+      rts: previous?.rts ?? false,
+      dtr: previous?.dtr ?? false,
+      logFilePath: previous?.logFilePath,
+      stats: previous?.stats ?? { bytesSent: 0, bytesReceived: 0 },
+    };
   }
 
   dispose(): void {
@@ -206,18 +246,27 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
             message.value,
             vscode.ConfigurationTarget.Global,
           )
-          .then(() => this.postState());
+          .then(
+            () => this.postState(),
+            (err) => vscode.window.showErrorMessage(`Failed to update setting: ${errorMessage(err)}`),
+          );
         break;
       case 'updateTerminalColor':
         void this.config()
           .update(message.which === 'tx' ? 'txColor' : 'rxColor', message.value, vscode.ConfigurationTarget.Global)
-          .then(() => {
-            this.terminalColors[message.which] = message.value;
-            this.postState();
-          });
+          .then(
+            () => {
+              this.terminalColors[message.which] = message.value;
+              this.postState();
+            },
+            (err) => vscode.window.showErrorMessage(`Failed to update terminal color: ${errorMessage(err)}`),
+          );
         break;
       case 'updateSessionBaudRate':
         void this.updateSessionBaudRate(message.path, message.baudRate);
+        break;
+      case 'updateSessionSetting':
+        this.updateSessionSetting(message.path, message.field, message.value);
         break;
       case 'setCheckbox':
         this.setCheckbox(message.path, message.checkbox, message.value);
@@ -225,15 +274,26 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       case 'addTemplate':
         void this.templates
           .add({ name: message.name, format: message.format, data: message.data })
-          .then(() => this.postState());
+          .then(
+            () => this.postState(),
+            (err) => vscode.window.showErrorMessage(`Failed to save template: ${errorMessage(err)}`),
+          );
         break;
       case 'updateTemplate':
         void this.templates
           .update(message.id, { name: message.name, format: message.format, data: message.data })
-          .then(() => this.postState());
+          .then(
+            () => this.postState(),
+            (err) => vscode.window.showErrorMessage(`Failed to save template: ${errorMessage(err)}`),
+          );
         break;
       case 'deleteTemplate':
-        void this.templates.remove(message.id).then(() => this.postState());
+        void this.templates
+          .remove(message.id)
+          .then(
+            () => this.postState(),
+            (err) => vscode.window.showErrorMessage(`Failed to delete template: ${errorMessage(err)}`),
+          );
         break;
       case 'sendTemplate':
         void this.sendTemplate(message.id, message.path);
@@ -244,10 +304,15 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       case 'clearLogFolder':
         void this.config()
           .update('saveLogAt', undefined, vscode.ConfigurationTarget.Global)
-          .then(() => this.postState());
+          .then(
+            () => this.postState(),
+            (err) => vscode.window.showErrorMessage(`Failed to reset log folder: ${errorMessage(err)}`),
+          );
         break;
       case 'openLogFile':
-        void vscode.window.showTextDocument(vscode.Uri.file(message.path));
+        void vscode.window
+          .showTextDocument(vscode.Uri.file(message.path))
+          .then(undefined, (err) => vscode.window.showErrorMessage(`Failed to open log file: ${errorMessage(err)}`));
         break;
     }
   }
@@ -269,6 +334,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     }
     if (!this.sessionOrder.includes(path)) {
       this.sessionOrder.push(path);
+      this.persistSessions();
     }
     if (this.connections.isOpen(path)) {
       vscode.window.showInformationMessage(`${path} is already open.`);
@@ -293,6 +359,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     }
     this.sessionOrder = this.sessionOrder.filter((p) => p !== path);
     this.closedMeta.delete(path);
+    this.persistSessions();
     this.postState();
   }
 
@@ -300,6 +367,10 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
    * previously added and closed, then attaches the terminal and a listener that snapshots
    * the session's state into `closedMeta` whenever it closes again, for any reason. */
   private async openPath(path: string): Promise<void> {
+    if (this.connections.isOpen(path) || this.openingPaths.has(path)) {
+      return;
+    }
+    this.openingPaths.add(path);
     const meta = this.closedMeta.get(path);
     const config = meta?.config ?? this.getDefaultConfig();
     try {
@@ -326,13 +397,21 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           logFilePath: connection.logFilePath,
           stats: { ...connection.stats },
         });
+        this.persistSessions();
       });
       this.closedMeta.delete(path);
+      this.persistSessions();
       const terminal = createSerialTerminal(connection, this.terminalColors);
       this.terminals.set(path, terminal);
       terminal.terminal.show(false);
     } catch (err) {
       vscode.window.showErrorMessage(`Failed to open ${path}: ${errorMessage(err)}`);
+      if (!this.closedMeta.has(path)) {
+        this.closedMeta.set(path, this.buildFallbackMeta(config, meta));
+        this.persistSessions();
+      }
+    } finally {
+      this.openingPaths.delete(path);
     }
     this.postState();
   }
@@ -340,6 +419,12 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
   private async updateSessionBaudRate(path: string, baudRate: number): Promise<void> {
     const connection = this.connections.get(path);
     if (!connection) {
+      const meta = this.closedMeta.get(path);
+      if (meta) {
+        meta.config = { ...meta.config, baudRate };
+        this.persistSessions();
+        this.postState();
+      }
       return;
     }
     try {
@@ -347,6 +432,17 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     } catch (err) {
       vscode.window.showErrorMessage(`Failed to change baud rate: ${errorMessage(err)}`);
     }
+  }
+
+  private updateSessionSetting(path: string, field: 'dataBits' | 'parity' | 'stopBits', value: string): void {
+    const meta = this.closedMeta.get(path);
+    if (!meta) {
+      return;
+    }
+    const coerced = field === 'parity' ? (value as PortConfig['parity']) : Number(value);
+    meta.config = { ...meta.config, [field]: coerced };
+    this.persistSessions();
+    this.postState();
   }
 
   private async browseLogFolder(): Promise<void> {
@@ -359,8 +455,12 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     if (!picked || picked.length === 0) {
       return;
     }
-    await this.config().update('saveLogAt', picked[0].fsPath, vscode.ConfigurationTarget.Global);
-    this.postState();
+    try {
+      await this.config().update('saveLogAt', picked[0].fsPath, vscode.ConfigurationTarget.Global);
+      this.postState();
+    } catch (err) {
+      vscode.window.showErrorMessage(`Failed to update log folder: ${errorMessage(err)}`);
+    }
   }
 
   private async updateDefaultSetting(field: SettingField, value: string): Promise<void> {
@@ -371,8 +471,12 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       stopBits: 'defaultStopBits',
     };
     const coerced = field === 'parity' ? value : Number(value);
-    await this.config().update(configKey[field], coerced, vscode.ConfigurationTarget.Global);
-    this.postState();
+    try {
+      await this.config().update(configKey[field], coerced, vscode.ConfigurationTarget.Global);
+      this.postState();
+    } catch (err) {
+      vscode.window.showErrorMessage(`Failed to update setting: ${errorMessage(err)}`);
+    }
   }
 
   private resolveLogFolderUri(): vscode.Uri {
@@ -426,6 +530,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     const meta = this.closedMeta.get(path);
     if (meta && checkbox !== 'record') {
       meta[checkbox] = value;
+      this.persistSessions();
       this.postState();
     }
   }
@@ -443,6 +548,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     const targetPath = path ?? open[0].path;
     const connection = this.connections.get(targetPath);
     if (!connection) {
+      vscode.window.showWarningMessage(`${targetPath} is not open.`);
       return;
     }
     try {

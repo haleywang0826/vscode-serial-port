@@ -1,6 +1,14 @@
 import * as vscode from 'vscode';
 import { PortConnection, TrafficEvent } from './connectionManager';
-import { appendHexInputChar, asciiStringToBytes, formatBytesForTerminal, hexStringToBytes, isHexDigitChar } from './format';
+import {
+  appendHexInputChar,
+  asciiStringToBytes,
+  concatBytes,
+  formatBytesForTerminal,
+  hexStringToBytes,
+  isHexDigitChar,
+  splitTrailingEscape,
+} from './format';
 
 const ENTER = '\r';
 const BACKSPACE = '\x7f';
@@ -50,6 +58,12 @@ export function createSerialTerminal(connection: PortConnection, colors: Termina
   const closeEmitter = new vscode.EventEmitter<void>();
   let line = '';
   let rows = DEFAULT_ROWS;
+  /** Bytes held back from the previous RX event because they looked like an incomplete ANSI CSI
+   * (color) sequence at the very end of the chunk — prepended to the next RX event before
+   * formatting, so a sequence split across two `serialport` `'data'` reads still renders as one
+   * color escape instead of garbling as two half-sequences. Ascii mode only; hex mode and TX never
+   * carry anything over. */
+  let pendingRx: Uint8Array = new Uint8Array(0);
 
   const setScrollRegion = (): void => {
     writeEmitter.fire(`\x1b[1;${rows - 1}r`);
@@ -66,6 +80,14 @@ export function createSerialTerminal(connection: PortConnection, colors: Termina
   };
 
   const trafficSub = connection.onDidTraffic((event) => {
+    if (event.direction === 'RX' && !connection.hexRecv) {
+      const merged = pendingRx.length > 0 ? concatBytes(pendingRx, event.bytes) : event.bytes;
+      const { complete, pending } = splitTrailingEscape(merged);
+      pendingRx = pending;
+      printAboveInput(formatTrafficLine(connection, event, colors, complete));
+      return;
+    }
+    pendingRx = new Uint8Array(0);
     printAboveInput(formatTrafficLine(connection, event, colors));
   });
 
@@ -151,12 +173,19 @@ function promptFor(connection: PortConnection): string {
 
 /** Renders one TX/RX event for the terminal: colored by direction using the user-configured
  * `colors`, optionally prefixed with the shared timestamp from the event (the same value written
- * to the file log, never recomputed). */
-function formatTrafficLine(connection: PortConnection, event: TrafficEvent, colors: TerminalColors): string {
+ * to the file log, never recomputed). `bytesOverride`, when given, replaces `event.bytes` — used
+ * for RX-ascii-mode events whose bytes were merged/split against a carried-over ANSI escape
+ * fragment (see `pendingRx` above). */
+function formatTrafficLine(
+  connection: PortConnection,
+  event: TrafficEvent,
+  colors: TerminalColors,
+  bytesOverride?: Uint8Array,
+): string {
   const hex = event.direction === 'TX' ? connection.hexSend : connection.hexRecv;
   const color = ansiTruecolor(event.direction === 'TX' ? colors.tx : colors.rx);
   const prefix = connection.showTimestamp ? `${DIM}[${event.timestamp}] ${event.direction}${RESET} ` : '';
-  return `${prefix}${color}${formatBytesForTerminal(event.bytes, hex)}${RESET}\r\n`;
+  return `${prefix}${color}${formatBytesForTerminal(bytesOverride ?? event.bytes, hex)}${RESET}\r\n`;
 }
 
 /** Converts a "#rrggbb" hex color into a 24-bit ANSI SGR foreground-color escape sequence.

@@ -14,6 +14,7 @@ export function activate(context: vscode.ExtensionContext): void {
     templates,
     terminals,
     context.globalStorageUri,
+    context.globalState,
   );
 
   context.subscriptions.push(
