@@ -1,6 +1,7 @@
 {
   "name": "vscode-serial-port",
   "displayName": "Serial Port for VSCode",
+  "icon": "media/icon.png",
   "description": "Full-featured serial port tool for VS Code: monitor, send/receive (hex or ASCII), RTS/DTR control, multiple ports in parallel, log-to-file, and reusable send templates. Works transparently from WSL windows against physical Windows ports.",
   "version": "0.0.1",
   "publisher": "REPLACE_ME_PUBLISHER_ID",
