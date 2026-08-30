@@ -4,7 +4,7 @@
   "icon": "media/icon.png",
   "description": "Full-featured serial port tool for VS Code: monitor, send/receive (hex or ASCII), RTS/DTR control, multiple ports in parallel, log-to-file, and reusable send templates. Works transparently from WSL windows against physical Windows ports.",
   "version": "0.0.1",
-  "publisher": "REPLACE_ME_PUBLISHER_ID",
+  "publisher": "haleywang",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -58,19 +58,34 @@
         },
         "serialPort.defaultDataBits": {
           "type": "number",
-          "enum": [5, 6, 7, 8],
+          "enum": [
+            5,
+            6,
+            7,
+            8
+          ],
           "default": 8,
           "description": "Default data bits used when a newly added port is opened."
         },
         "serialPort.defaultParity": {
           "type": "string",
-          "enum": ["none", "even", "odd", "mark", "space"],
+          "enum": [
+            "none",
+            "even",
+            "odd",
+            "mark",
+            "space"
+          ],
           "default": "none",
           "description": "Default parity used when a newly added port is opened."
         },
         "serialPort.defaultStopBits": {
           "type": "number",
-          "enum": [1, 1.5, 2],
+          "enum": [
+            1,
+            1.5,
+            2
+          ],
           "default": 1,
           "description": "Default stop bits used when a newly added port is opened."
         },
@@ -105,7 +120,12 @@
           "description": "Reusable send templates shown in the Send Templates panel section.",
           "items": {
             "type": "object",
-            "required": ["id", "name", "format", "data"],
+            "required": [
+              "id",
+              "name",
+              "format",
+              "data"
+            ],
             "properties": {
               "id": {
                 "type": "string"
@@ -115,7 +135,10 @@
               },
               "format": {
                 "type": "string",
-                "enum": ["hex", "ascii"]
+                "enum": [
+                  "hex",
+                  "ascii"
+                ]
               },
               "data": {
                 "type": "string"
@@ -173,6 +196,7 @@
     "@vscode/codicons": "^0.0.46-24",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.2",
     "eslint": "^10.9.1",
     "prettier": "^3.9.6",
