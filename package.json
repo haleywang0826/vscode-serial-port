@@ -19,10 +19,12 @@
   "keywords": [
     "serial",
     "serial port",
+    "serial monitor",
+    "serial terminal",
     "com port",
     "uart",
     "embedded",
-    "wsl"
+    "rs232"
   ],
   "extensionKind": [
     "ui"
