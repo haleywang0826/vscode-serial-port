@@ -3,7 +3,7 @@
   "displayName": "Serial Port for VSCode",
   "icon": "media/icon.png",
   "description": "Full-featured serial port tool for VS Code: monitor, send/receive (hex or ASCII), RTS/DTR control, multiple ports in parallel, log-to-file, and reusable send templates. Works transparently from WSL windows against physical Windows ports.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "haleywang",
   "license": "MIT",
   "repository": {
@@ -27,7 +27,19 @@
   "extensionKind": [
     "ui"
   ],
-  "activationEvents": [],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "This extension only talks to physical serial ports and writes log files; it does not execute any workspace code."
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "Serial port I/O and log files always resolve against the local/UI-side filesystem regardless of workspace type; recording to a virtual workspace folder is not supported."
+    }
+  },
+  "activationEvents": [
+    "onView:serialPortExplorer"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
