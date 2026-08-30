@@ -3,7 +3,7 @@
   "displayName": "Serial Port for VSCode",
   "icon": "media/icon.png",
   "description": "Full-featured serial port tool for VS Code: monitor, send/receive (hex or ASCII), RTS/DTR control, multiple ports in parallel, log-to-file, and reusable send templates. Works transparently from WSL windows against physical Windows ports.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "haleywang",
   "license": "MIT",
   "repository": {
@@ -11,7 +11,7 @@
     "url": "https://github.com/haleywang0826/vscode-serial-port"
   },
   "engines": {
-    "vscode": "^1.134.0"
+    "vscode": "^1.60.0"
   },
   "categories": [
     "Other"
@@ -192,7 +192,7 @@
     "@eslint/js": "^10.0.1",
     "@types/mocha": "^10.0.10",
     "@types/node": "^26.4.0",
-    "@types/vscode": "^1.134.0",
+    "@types/vscode": "^1.60.0",
     "@vscode/codicons": "^0.0.46-24",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0",
