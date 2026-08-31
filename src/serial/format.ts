@@ -7,8 +7,12 @@ export function bytesToHex(data: Uint8Array): string {
 
 /**
  * Renders bytes as text: a CRLF pair or a lone CR/LF becomes one real line break ('\n'), a Tab
- * passes through as a literal '\t', and any other non-printable control character renders as '.'.
- * Never mutates the underlying bytes — this only affects the display string built from them.
+ * passes through as a literal '\t', and every other byte — including every other ASCII control
+ * character (VT, FF, BEL, a lone ESC, ...) — is written through as its own literal character
+ * rather than collapsed into a placeholder like '.'. This keeps the display a direct, lossless
+ * reflection of the raw byte value (what a given viewer does with an unusual character code is up
+ * to that viewer, not a substitution we make on its behalf). Never mutates the underlying bytes —
+ * this only affects the display string built from them.
  */
 export function bytesToAscii(data: Uint8Array): string {
   let out = '';
@@ -27,7 +31,7 @@ export function bytesToAscii(data: Uint8Array): string {
       out += '\t';
       continue;
     }
-    out += byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.';
+    out += String.fromCharCode(byte);
   }
   return out;
 }
@@ -41,10 +45,14 @@ const ESC = 0x1b;
 /**
  * Like `bytesToAscii`, but for terminal display: an embedded ANSI SGR (color) escape sequence
  * (`ESC [ ... m`) is passed through verbatim, so a device that colors its own serial output
- * renders as intended ("terminal standard" color support). Any other escape sequence (cursor
- * movement, scroll-region changes, etc.) is dropped instead of passed through, since letting a
- * device move the cursor or redefine the scroll region could corrupt the terminal's own
- * pinned-input-line scroll region.
+ * renders as intended ("terminal standard" color support). A multi-byte CSI sequence that isn't
+ * SGR (cursor movement, scroll-region changes, etc.) is still dropped instead of passed through,
+ * since letting a device move the cursor or redefine the scroll region could corrupt the
+ * terminal's own pinned-input-line scroll region — that's a distinct, deliberate exception,
+ * unrelated to the plain-byte handling below. Every other byte, including every single-byte ASCII
+ * control character (VT, FF, BEL, a lone ESC, ...), is written through as its own literal
+ * character rather than collapsed into a placeholder like '.', so what's on screen — and what a
+ * user copies from it — reflects the actual raw byte value.
  */
 export function bytesToAsciiForTerminal(data: Uint8Array): string {
   let out = '';
@@ -75,7 +83,7 @@ export function bytesToAsciiForTerminal(data: Uint8Array): string {
       out += '\t';
       continue;
     }
-    out += byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.';
+    out += String.fromCharCode(byte);
   }
   return out;
 }

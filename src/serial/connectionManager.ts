@@ -26,8 +26,8 @@ export interface PortStats {
 /** One TX/RX event: raw bytes plus the single timestamp computed for it, shared by the file log
  * and any live display so the two never disagree or compute it independently. `hex` is the
  * send/recv mode that was active at the moment this event happened (not necessarily the
- * connection's *current* mode, which can change mid-session) — captured per-event so history
- * playback (see `PortConnection.history`) always renders each line the way it actually looked. */
+ * connection's *current* mode, which can change mid-session) — captured per-event so a live
+ * terminal/log line always renders the way it actually looked, even after a mode change. */
 export interface TrafficEvent {
   direction: 'TX' | 'RX';
   bytes: Uint8Array;
@@ -41,11 +41,11 @@ const LOG_FLUSH_DEBOUNCE_MS = 300;
  * option (it always replaces full file contents), so the alternative is rewriting the *entire*
  * session's log on every flush, an unbounded and ever-growing cost. */
 const LOG_ROTATE_BYTES = 4 * 1024 * 1024;
-/** Cap on the in-memory per-connection traffic history (see `PortConnection.history`), kept for
- * every session — open or not yet recording — so that enabling "Record to File" mid-session can
- * backfill everything shown so far. Bounded the same way log rotation is, so a long-lived,
- * never-recorded session can't grow this without limit. */
-const HISTORY_MAX_BYTES = 4 * 1024 * 1024;
+/** Cap on the in-memory per-connection plain-text traffic buffer (see `PortConnection.historyText`),
+ * kept for every session — open or not yet recording — so that enabling "Record to File" mid-session
+ * can back-fill the log with everything shown so far. Bounded the same way log rotation is, so a
+ * long-lived, never-recorded session can't grow this without limit. */
+const HISTORY_MAX_CHARS = 4 * 1024 * 1024;
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -91,13 +91,16 @@ export class PortConnection {
   private logFlushChain: Promise<void> = Promise.resolve();
   private logDirReady: Promise<void> = Promise.resolve();
   private controlLineChain: Promise<void> = Promise.resolve();
-  /** Every TX/RX event this connection instance has ever seen, capped to `HISTORY_MAX_BYTES`.
+  /** Plain-text buffer of every already-formatted line this connection instance has produced so
+   * far (content only — no timestamp/direction/mode header), capped to `HISTORY_MAX_CHARS`.
    * Populated unconditionally (not just while recording) so turning "Record to File" on mid-session
-   * can back-fill the log with everything already shown — see `setRecording`. Scoped to this
-   * connection *instance*, so a fresh reopen naturally starts with an empty history and a later RF
-   * enable only ever backfills that reopen's own traffic, never a prior open's. */
-  private readonly history: TrafficEvent[] = [];
-  private historyBytes = 0;
+   * can back-fill the log with everything already shown — see `setRecording`. Backfilled lines
+   * deliberately carry no header: we don't know (and the user doesn't want us guessing) what
+   * header, if any, applied when each line originally appeared, so only live-recorded lines going
+   * forward get one. Scoped to this connection *instance*, so a fresh reopen naturally starts with
+   * an empty buffer and a later RF enable only ever backfills that reopen's own traffic, never a
+   * prior open's. */
+  private historyText = '';
 
   private readonly onDidTrafficEmitter = new vscode.EventEmitter<TrafficEvent>();
   /** Fires for every TX (typed or template-sent) and RX event, so any live view always sees
@@ -158,7 +161,7 @@ export class PortConnection {
         this.stats.bytesSent += bytes.length;
         const event: TrafficEvent = { direction: 'TX', bytes, timestamp, hex };
         this.appendLog(event);
-        this.pushHistory(event);
+        this.appendHistory(bytes, hex);
         this.onDidTrafficEmitter.fire(event);
         this.onDidUpdateEmitter.fire();
         resolve();
@@ -197,9 +200,12 @@ export class PortConnection {
    * what lets a close/reopen with RF already checked keep appending to the SAME file rather than
    * fragmenting into a new one each time. Omitting it (the default — used when the user flips the
    * checkbox on live, whether the port is open or not) starts a fresh file and backfills it with
-   * this connection instance's own `history` so far, covering the whole communication period
-   * already shown; since `history` is scoped to this connection instance, a reopened connection's
-   * empty history means turning RF on after a reopen only ever backfills that reopen's own traffic.
+   * this connection instance's own `historyText` so far, covering the whole communication period
+   * already shown — pasted in verbatim, with no timestamp header, since we don't know (and were
+   * asked not to guess) what header, if any, applied when each backfilled line originally
+   * appeared; only lines recorded from this point on get one. Since `historyText` is scoped to
+   * this connection instance, a reopened connection's empty buffer means turning RF on after a
+   * reopen only ever backfills that reopen's own traffic.
    */
   setRecording(value: boolean, logFolderUri?: vscode.Uri, reuseFileUri?: vscode.Uri): void {
     this.recording = value;
@@ -217,8 +223,9 @@ export class PortConnection {
         this.logFileUriInternal = reuseFileUri;
       } else {
         this.logFileUriInternal = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
-        for (const event of this.history) {
-          this.writeLogLine(event.direction, event.bytes, event.timestamp, event.hex);
+        if (this.historyText) {
+          this.logBuffer += this.historyText;
+          this.scheduleLogFlush();
         }
       }
     } else if (!value) {
@@ -307,7 +314,7 @@ export class PortConnection {
     this.stats.bytesReceived += bytes.length;
     const event: TrafficEvent = { direction: 'RX', bytes, timestamp, hex };
     this.appendLog(event);
-    this.pushHistory(event);
+    this.appendHistory(bytes, hex);
     this.onDidTrafficEmitter.fire(event);
     this.onDidUpdateEmitter.fire();
   }
@@ -319,8 +326,9 @@ export class PortConnection {
     this.writeLogLine(event.direction, event.bytes, event.timestamp, event.hex);
   }
 
-  /** Appends one already-known event to the log buffer, independent of `this.recording` — shared
-   * by live `appendLog` and `setRecording`'s backfill-from-history path. */
+  /** Formats and appends one live event to the log buffer with its full header — used only by
+   * `appendLog`. Backfilled history lines skip this entirely (see `setRecording`), since they
+   * carry no header. */
   private writeLogLine(direction: 'TX' | 'RX', bytes: Uint8Array, timestamp: string, hex: boolean): void {
     const formatted = formatBytes(bytes, hex);
     const line = `${formatTrafficHeader(timestamp, direction, hex)} ${formatted}`;
@@ -330,16 +338,19 @@ export class PortConnection {
     }
   }
 
-  /** Records `event` into the bounded in-memory history (see `history` field), regardless of
-   * whether recording is currently on, so a later "Record to File" enable can backfill it. */
-  private pushHistory(event: TrafficEvent): void {
-    this.history.push(event);
-    this.historyBytes += event.bytes.length;
-    while (this.historyBytes > HISTORY_MAX_BYTES && this.history.length > 1) {
-      const removed = this.history.shift();
-      if (removed) {
-        this.historyBytes -= removed.bytes.length;
+  /** Appends `formatBytes(bytes, hex)` (content only, no header) to the bounded plain-text
+   * `historyText` buffer, regardless of whether recording is currently on, so a later "Record to
+   * File" enable can backfill it. Trims whole leading lines (never a mid-line cut) once the cap is
+   * exceeded, so backfilled content always starts at a line boundary. */
+  private appendHistory(bytes: Uint8Array, hex: boolean): void {
+    this.historyText += formatBytes(bytes, hex) + '\n';
+    while (this.historyText.length > HISTORY_MAX_CHARS) {
+      const newlineIndex = this.historyText.indexOf('\n');
+      if (newlineIndex === -1) {
+        this.historyText = '';
+        break;
       }
+      this.historyText = this.historyText.slice(newlineIndex + 1);
     }
   }
 
