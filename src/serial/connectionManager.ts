@@ -504,8 +504,12 @@ export class ConnectionManager {
       connection.onDidUpdate(() => this.onDidChangeEmitter.fire());
       connection.onDidClose(() => {
         this.connections.delete(path);
-        connection.dispose();
         this.onDidChangeEmitter.fire();
+        // Deferred: disposing the connection's own emitters synchronously from within one of
+        // their own fire() callbacks risks cutting off any other onDidClose listener (the panel's
+        // closed-session snapshot capture, the terminal's auto-detach) registered after this one
+        // that hasn't been invoked yet.
+        queueMicrotask(() => connection.dispose());
       });
       this.connections.set(path, connection);
       this.onDidChangeEmitter.fire();

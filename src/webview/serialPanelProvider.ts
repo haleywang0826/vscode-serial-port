@@ -469,17 +469,12 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     const config = meta?.config ?? this.getDefaultConfig();
     try {
       const connection = await this.connections.open(path, config, this.formatSettings);
-      connection.setHexSend(meta?.hexSend ?? this.getDefaultHexSend());
-      connection.setHexRecv(meta?.hexRecv ?? this.getDefaultHexRecv());
-      connection.setShowTimestamp(meta?.showTimestamp ?? this.getDefaultShowTimestamp());
-      // Always explicitly assert RTS/DTR (rather than only when they differ from the connection's
-      // own field defaults) — the OS/driver may leave a freshly-opened port's lines in whatever
-      // state it defaults to, which isn't necessarily the deasserted baseline these default to.
-      await Promise.all([connection.setRTS(meta?.rts ?? false), connection.setDTR(meta?.dtr ?? false)]).catch(
-        (err) => {
-          vscode.window.showErrorMessage(`Failed to set RTS/DTR for ${path}: ${errorMessage(err)}`);
-        },
-      );
+      // Registered immediately — with no `await` in between — so a hardware-triggered close (e.g.
+      // an Arduino/ESP auto-reset dropping the USB CDC port the instant RTS/DTR are asserted below)
+      // can never race past this point and leave this session's state uncaptured. Everything this
+      // listener reads (recording, hex flags, ...) is itself applied synchronously right below,
+      // before the one genuinely async/reset-risking step (RTS/DTR), so the snapshot it captures is
+      // accurate no matter how soon the close fires.
       connection.onDidClose(() => {
         this.closedMeta.set(path, {
           config: connection.config,
@@ -495,17 +490,35 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         });
         this.persistSessions();
       });
-      this.closedMeta.delete(path);
-      this.persistSessions();
+      connection.setHexSend(meta?.hexSend ?? this.getDefaultHexSend());
+      connection.setHexRecv(meta?.hexRecv ?? this.getDefaultHexRecv());
+      connection.setShowTimestamp(meta?.showTimestamp ?? this.getDefaultShowTimestamp());
       if (meta?.recording) {
         // RF was already checked before this open (or survives from a prior open of the same
         // session) — reuse the same file (if one exists yet) rather than starting a new one, so a
         // close/reopen cycle with RF on keeps appending to a single file instead of fragmenting.
+        // Applied here (before the RTS/DTR await below) so it's already reflected on `connection`
+        // — and thus in the onDidClose snapshot above — even if that step closes the port again.
         connection.setRecording(
           true,
           this.resolveLogFolderUri(),
           meta.logFileUri ? vscode.Uri.parse(meta.logFileUri) : undefined,
         );
+      }
+      // Always explicitly assert RTS/DTR (rather than only when they differ from the connection's
+      // own field defaults) — the OS/driver may leave a freshly-opened port's lines in whatever
+      // state it defaults to, which isn't necessarily the deasserted baseline these default to.
+      await Promise.all([connection.setRTS(meta?.rts ?? false), connection.setDTR(meta?.dtr ?? false)]).catch(
+        (err) => {
+          vscode.window.showErrorMessage(`Failed to set RTS/DTR for ${path}: ${errorMessage(err)}`);
+        },
+      );
+      if (connection.isOpen) {
+        // Only clear the closed-session snapshot once the port is confirmed still open — if it
+        // already closed during setup above, the onDidClose listener just captured a fresh,
+        // accurate snapshot, and deleting it here would discard that instead.
+        this.closedMeta.delete(path);
+        this.persistSessions();
       }
       const terminal = this.getOrCreateTerminal(path);
       terminal.attach(connection);
