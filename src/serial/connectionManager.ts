@@ -229,22 +229,42 @@ export class PortConnection {
    * appeared; only lines recorded from this point on get one. Since `historyText` is scoped to
    * this connection instance, a reopened connection's empty buffer means turning RF on after a
    * reopen only ever backfills that reopen's own traffic.
+   *
+   * `reuseFileUri` only reuses the *filename* — this is a fresh `PortConnection` instance (a
+   * reopen), so its own `logBuffer`/`historyText` know nothing about whatever that file already
+   * holds on disk from before the last close. `vscode.workspace.fs.writeFile` has no append mode
+   * (every flush rewrites the *entire* file from `logBuffer`), so without reading that existing
+   * content back in first, the next flush would silently replace it with only the traffic
+   * recorded since this reopen. The read is chained onto `logDirReady` — which `flushLogFile`
+   * already awaits, and (see there) now also defers capturing `logBuffer` until after that await
+   * resolves — so a flush can never race ahead of this and write a truncated file.
    */
   setRecording(value: boolean, logFolderUri?: vscode.Uri, reuseFileUri?: vscode.Uri): void {
     this.recording = value;
     if (value && logFolderUri) {
       this.logFolderUri = logFolderUri;
-      this.logDirReady = (async () => {
+      this.logBuffer = '';
+      const ensureFolder = async (): Promise<void> => {
         try {
           await vscode.workspace.fs.createDirectory(logFolderUri);
         } catch (err) {
           vscode.window.showErrorMessage(`Failed to create log folder: ${errorMessage(err)}`);
         }
-      })();
-      this.logBuffer = '';
+      };
       if (reuseFileUri) {
         this.logFileUriInternal = reuseFileUri;
+        this.logDirReady = (async () => {
+          await ensureFolder();
+          try {
+            const existing = await vscode.workspace.fs.readFile(reuseFileUri);
+            this.logBuffer = Buffer.from(existing).toString('utf8') + this.logBuffer;
+          } catch {
+            // Nothing on disk yet (RF was checked but no traffic was ever flushed before the port
+            // closed) — nothing to preserve, continue with an empty buffer.
+          }
+        })();
       } else {
+        this.logDirReady = ensureFolder();
         this.logFileUriInternal = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
         if (this.historyText) {
           this.logBuffer += this.historyText;
@@ -446,18 +466,24 @@ export class PortConnection {
       return;
     }
     const uri = this.logFileUriInternal;
-    const content = Buffer.from(this.logBuffer, 'utf8');
     this.logFlushChain = this.logFlushChain
       .then(() => this.logDirReady)
-      .then(() => vscode.workspace.fs.writeFile(uri, content))
+      .then(() => {
+        // `this.logBuffer` is read only now, after `logDirReady` resolves, rather than captured
+        // synchronously above — `logDirReady` may still be prepending a reused file's on-disk
+        // content onto it (see `setRecording`), and reading it any earlier could win that race and
+        // write a truncated file.
+        const content = Buffer.from(this.logBuffer, 'utf8');
+        if (content.byteLength >= LOG_ROTATE_BYTES && this.logFolderUri) {
+          // Start a fresh segment so future flushes don't need to resend everything written so far.
+          this.logFileUriInternal = vscode.Uri.joinPath(this.logFolderUri, buildLogFileName(this.path));
+          this.logBuffer = '';
+        }
+        return vscode.workspace.fs.writeFile(uri, content);
+      })
       .catch((err) => {
         vscode.window.showErrorMessage(`Failed to write serial log file: ${errorMessage(err)}`);
       });
-    if (content.byteLength >= LOG_ROTATE_BYTES && this.logFolderUri) {
-      // Start a fresh segment so future flushes don't need to resend everything written so far.
-      this.logFileUriInternal = vscode.Uri.joinPath(this.logFolderUri, buildLogFileName(this.path));
-      this.logBuffer = '';
-    }
   }
 }
 
