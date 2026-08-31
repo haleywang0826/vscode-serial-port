@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SerialPort } from 'serialport';
-import { ConnectionManager, DEFAULT_PORT_CONFIG, PortConfig } from '../serial/connectionManager';
+import { ConnectionManager, DEFAULT_PORT_CONFIG, FormatSettings, PortConfig } from '../serial/connectionManager';
 import { asciiStringToBytes, hexStringToBytes } from '../serial/format';
 import { createSerialTerminal, SerialTerminal, TerminalColors } from '../serial/pseudoterminal';
 import { SendFormat, TemplateStore } from '../templates/templateStore';
@@ -18,7 +18,7 @@ const CLOSED_META_KEY = 'serialPort.closedMeta';
 
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
 type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp' | 'rts' | 'dtr';
-type DefaultCheckbox = 'hexSend' | 'hexRecv';
+type DefaultCheckbox = 'hexSend' | 'hexRecv' | 'showTimestamp' | 'compactTimestamps';
 type TerminalColorKey = 'tx' | 'rx';
 
 type ClientMessage =
@@ -30,6 +30,7 @@ type ClientMessage =
   | { type: 'removeSession'; path: string }
   | { type: 'updateDefaultSetting'; field: SettingField; value: string }
   | { type: 'updateDefaultCheckbox'; checkbox: DefaultCheckbox; value: boolean }
+  | { type: 'updateMessageGapMs'; value: number }
   | { type: 'updateTerminalColor'; which: TerminalColorKey; value: string }
   | { type: 'updateSessionBaudRate'; path: string; baudRate: number }
   | { type: 'updateSessionSetting'; path: string; field: 'dataBits' | 'parity' | 'stopBits'; value: string }
@@ -83,6 +84,9 @@ interface PanelState {
   defaultConfig: PortConfig;
   defaultHexSend: boolean;
   defaultHexRecv: boolean;
+  defaultShowTimestamp: boolean;
+  compactTimestamps: boolean;
+  messageGapMs: number;
   txColor: string;
   rxColor: string;
   saveLogAt: string;
@@ -104,6 +108,11 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
    * (and kept in sync with) `serialPort.txColor`/`serialPort.rxColor`, but the object itself is
    * never reassigned. */
   private readonly terminalColors: TerminalColors = { tx: DEFAULT_TX_COLOR, rx: DEFAULT_RX_COLOR };
+  /** Live-configurable compact-timestamp/message-gap settings, passed by reference into every open
+   * `PortConnection` and terminal so a change here is visible live without reopening the port — see
+   * `FormatSettings`. Populated from (and kept in sync with) `serialPort.compactTimestamps`/
+   * `serialPort.messageGapMs`, but the object itself is never reassigned. */
+  private readonly formatSettings: FormatSettings = { compactTimestamps: true, messageGapMs: 20 };
   private ports: { path: string; description: string }[] = [];
   /** Paths ever added via the "+" button, in add-order. A session card renders for every entry
    * here regardless of whether its port is currently open — see `closedMeta` below. */
@@ -140,6 +149,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     this.subscriptions.push(connections.onDidChange(() => this.syncTerminalConnections()));
     this.terminalColors.tx = this.config().get<string>('txColor', DEFAULT_TX_COLOR);
     this.terminalColors.rx = this.config().get<string>('rxColor', DEFAULT_RX_COLOR);
+    this.formatSettings.compactTimestamps = this.config().get<boolean>('compactTimestamps', true);
+    this.formatSettings.messageGapMs = this.config().get<number>('messageGapMs', 20);
     this.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (!e.affectsConfiguration('serialPort')) {
@@ -147,6 +158,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         }
         this.terminalColors.tx = this.config().get<string>('txColor', DEFAULT_TX_COLOR);
         this.terminalColors.rx = this.config().get<string>('rxColor', DEFAULT_RX_COLOR);
+        this.formatSettings.compactTimestamps = this.config().get<boolean>('compactTimestamps', true);
+        this.formatSettings.messageGapMs = this.config().get<number>('messageGapMs', 20);
         this.postState();
       }),
     );
@@ -177,6 +190,10 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     return this.config().get<boolean>('defaultHexRecv', false);
   }
 
+  private getDefaultShowTimestamp(): boolean {
+    return this.config().get<boolean>('defaultShowTimestamp', false);
+  }
+
   /** Persists `sessionOrder`/`closedMeta` to `globalState` so both survive an extension-host
    * restart (window reload, VS Code update, crash) instead of being wiped every time. */
   private persistSessions(): void {
@@ -193,7 +210,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       config,
       hexSend: previous?.hexSend ?? this.getDefaultHexSend(),
       hexRecv: previous?.hexRecv ?? this.getDefaultHexRecv(),
-      showTimestamp: previous?.showTimestamp ?? false,
+      showTimestamp: previous?.showTimestamp ?? this.getDefaultShowTimestamp(),
       rts: previous?.rts ?? false,
       dtr: previous?.dtr ?? false,
       recording: previous?.recording ?? false,
@@ -254,15 +271,34 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       case 'updateDefaultSetting':
         void this.updateDefaultSetting(message.field, message.value);
         break;
-      case 'updateDefaultCheckbox':
+      case 'updateDefaultCheckbox': {
+        const configKey: Record<DefaultCheckbox, string> = {
+          hexSend: 'defaultHexSend',
+          hexRecv: 'defaultHexRecv',
+          showTimestamp: 'defaultShowTimestamp',
+          compactTimestamps: 'compactTimestamps',
+        };
         void this.config()
-          .update(
-            message.checkbox === 'hexSend' ? 'defaultHexSend' : 'defaultHexRecv',
-            message.value,
-            vscode.ConfigurationTarget.Global,
-          )
+          .update(configKey[message.checkbox], message.value, vscode.ConfigurationTarget.Global)
           .then(
-            () => this.postState(),
+            () => {
+              if (message.checkbox === 'compactTimestamps') {
+                this.formatSettings.compactTimestamps = message.value;
+              }
+              this.postState();
+            },
+            (err) => vscode.window.showErrorMessage(`Failed to update setting: ${errorMessage(err)}`),
+          );
+        break;
+      }
+      case 'updateMessageGapMs':
+        void this.config()
+          .update('messageGapMs', message.value, vscode.ConfigurationTarget.Global)
+          .then(
+            () => {
+              this.formatSettings.messageGapMs = message.value;
+              this.postState();
+            },
             (err) => vscode.window.showErrorMessage(`Failed to update setting: ${errorMessage(err)}`),
           );
         break;
@@ -357,6 +393,13 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       this.sessionOrder.push(path);
       this.persistSessions();
     }
+    if (!this.closedMeta.has(path)) {
+      // Seeds a real closedMeta entry the moment a session is added, even before its first open —
+      // without this, a checkbox (RF, showTimestamp, ...) or baud-rate edit made on a never-opened
+      // session card has nothing to write into (setCheckbox/updateSessionBaudRate's no-connection
+      // branch silently no-ops on a missing entry) and is lost the moment the port is opened.
+      this.closedMeta.set(path, this.buildFallbackMeta(this.getDefaultConfig(), undefined));
+    }
     this.getOrCreateTerminal(path);
     if (this.connections.isOpen(path)) {
       vscode.window.showInformationMessage(`${path} is already open.`);
@@ -404,7 +447,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     if (existing) {
       return existing;
     }
-    const terminal = createSerialTerminal(path, this.terminalColors);
+    const terminal = createSerialTerminal(path, this.terminalColors, this.formatSettings);
     terminal.onDidUserClose(() => {
       if (this.sessionOrder.includes(path)) {
         void this.removeSession(path, { disposeTerminal: false });
@@ -425,10 +468,10 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     const meta = this.closedMeta.get(path);
     const config = meta?.config ?? this.getDefaultConfig();
     try {
-      const connection = await this.connections.open(path, config);
+      const connection = await this.connections.open(path, config, this.formatSettings);
       connection.setHexSend(meta?.hexSend ?? this.getDefaultHexSend());
       connection.setHexRecv(meta?.hexRecv ?? this.getDefaultHexRecv());
-      connection.setShowTimestamp(meta?.showTimestamp ?? false);
+      connection.setShowTimestamp(meta?.showTimestamp ?? this.getDefaultShowTimestamp());
       // Always explicitly assert RTS/DTR (rather than only when they differ from the connection's
       // own field defaults) — the OS/driver may leave a freshly-opened port's lines in whatever
       // state it defaults to, which isn't necessarily the deasserted baseline these default to.
@@ -668,6 +711,9 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       defaultConfig,
       defaultHexSend,
       defaultHexRecv,
+      defaultShowTimestamp: this.getDefaultShowTimestamp(),
+      compactTimestamps: this.formatSettings.compactTimestamps,
+      messageGapMs: this.formatSettings.messageGapMs,
       txColor: this.terminalColors.tx,
       rxColor: this.terminalColors.rx,
       saveLogAt: this.config().get<string>('saveLogAt', DEFAULT_SAVE_LOG_AT),
@@ -698,7 +744,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           hexSend: meta?.hexSend ?? defaultHexSend,
           hexRecv: meta?.hexRecv ?? defaultHexRecv,
           recording: meta?.recording ?? false,
-          showTimestamp: meta?.showTimestamp ?? false,
+          showTimestamp: meta?.showTimestamp ?? this.getDefaultShowTimestamp(),
           rts: meta?.rts ?? false,
           dtr: meta?.dtr ?? false,
           logFilePath: meta?.logFilePath,

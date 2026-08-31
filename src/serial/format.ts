@@ -1,5 +1,11 @@
 const HEX_BYTE_RE = /^[0-9a-fA-F]{2}$/;
 
+/** Decodes contiguous runs of "plain" bytes as UTF-8 (not per-byte `String.fromCharCode`, which
+ * cannot represent any multi-byte character — e.g. Chinese text is always multi-byte in UTF-8).
+ * `fatal: false` renders genuinely invalid UTF-8 as U+FFFD ('�'), matching standard terminal
+ * behavior (xterm, VS Code's own integrated terminal) rather than throwing or dropping bytes. */
+const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
+
 /** Formats bytes as space-separated uppercase hex pairs, e.g. "0A FF 3C". */
 export function bytesToHex(data: Uint8Array): string {
   return Array.from(data, (byte) => byte.toString(16).toUpperCase().padStart(2, '0')).join(' ');
@@ -8,31 +14,42 @@ export function bytesToHex(data: Uint8Array): string {
 /**
  * Renders bytes as text: a CRLF pair or a lone CR/LF becomes one real line break ('\n'), a Tab
  * passes through as a literal '\t', and every other byte — including every other ASCII control
- * character (VT, FF, BEL, a lone ESC, ...) — is written through as its own literal character
- * rather than collapsed into a placeholder like '.'. This keeps the display a direct, lossless
- * reflection of the raw byte value (what a given viewer does with an unusual character code is up
- * to that viewer, not a substitution we make on its behalf). Never mutates the underlying bytes —
- * this only affects the display string built from them.
+ * character (VT, FF, BEL, a lone ESC, ...) — is decoded as part of a contiguous UTF-8 run (see
+ * `utf8Decoder`) rather than collapsed into a placeholder like '.'. This keeps the display a
+ * direct, lossless reflection of the raw byte value for both ASCII and multi-byte text. Never
+ * mutates the underlying bytes — this only affects the display string built from them.
  */
 export function bytesToAscii(data: Uint8Array): string {
   let out = '';
+  let runStart = 0;
+  const flushRun = (end: number) => {
+    if (end > runStart) {
+      out += utf8Decoder.decode(data.subarray(runStart, end));
+    }
+  };
   for (let i = 0; i < data.length; i++) {
     const byte = data[i];
     if (byte === 0x0d && data[i + 1] === 0x0a) {
+      flushRun(i);
       out += '\n';
       i++;
+      runStart = i + 1;
       continue;
     }
     if (byte === 0x0d || byte === 0x0a) {
+      flushRun(i);
       out += '\n';
+      runStart = i + 1;
       continue;
     }
     if (byte === 0x09) {
+      flushRun(i);
       out += '\t';
+      runStart = i + 1;
       continue;
     }
-    out += String.fromCharCode(byte);
   }
+  flushRun(data.length);
   return out;
 }
 
@@ -50,12 +67,18 @@ const ESC = 0x1b;
  * since letting a device move the cursor or redefine the scroll region could corrupt the
  * terminal's own pinned-input-line scroll region — that's a distinct, deliberate exception,
  * unrelated to the plain-byte handling below. Every other byte, including every single-byte ASCII
- * control character (VT, FF, BEL, a lone ESC, ...), is written through as its own literal
- * character rather than collapsed into a placeholder like '.', so what's on screen — and what a
- * user copies from it — reflects the actual raw byte value.
+ * control character (VT, FF, BEL, a lone ESC, ...), is decoded as part of a contiguous UTF-8 run
+ * (see `utf8Decoder`) rather than collapsed into a placeholder like '.', so what's on screen — and
+ * what a user copies from it — reflects the actual raw byte value for both ASCII and multi-byte text.
  */
 export function bytesToAsciiForTerminal(data: Uint8Array): string {
   let out = '';
+  let runStart = 0;
+  const flushRun = (end: number) => {
+    if (end > runStart) {
+      out += utf8Decoder.decode(data.subarray(runStart, end));
+    }
+  };
   for (let i = 0; i < data.length; i++) {
     const byte = data[i];
     if (byte === ESC && data[i + 1] === 0x5b /* '[' */) {
@@ -63,28 +86,36 @@ export function bytesToAsciiForTerminal(data: Uint8Array): string {
       while (j < data.length && data[j] >= 0x30 && data[j] <= 0x3f) j++; // parameter bytes
       while (j < data.length && data[j] >= 0x20 && data[j] <= 0x2f) j++; // intermediate bytes
       if (j < data.length && data[j] >= 0x40 && data[j] <= 0x7e) {
+        flushRun(i);
         if (data[j] === 0x6d /* 'm' (SGR) */) {
           out += String.fromCharCode(...data.slice(i, j + 1));
         }
         i = j;
+        runStart = i + 1;
         continue;
       }
     }
     if (byte === 0x0d && data[i + 1] === 0x0a) {
+      flushRun(i);
       out += '\r\n'; // raw-mode pty needs an explicit CR to return to column 1
       i++;
+      runStart = i + 1;
       continue;
     }
     if (byte === 0x0d || byte === 0x0a) {
+      flushRun(i);
       out += '\r\n';
+      runStart = i + 1;
       continue;
     }
     if (byte === 0x09) {
+      flushRun(i);
       out += '\t';
+      runStart = i + 1;
       continue;
     }
-    out += String.fromCharCode(byte);
   }
+  flushRun(data.length);
   return out;
 }
 
@@ -97,12 +128,34 @@ export function formatBytesForTerminal(data: Uint8Array, hex: boolean): string {
  * always exactly the same length regardless of mode, keeping columns aligned line-to-line. */
 const MODE_WIDTH = 5;
 
+const MONTH_ABBREVIATIONS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/** Compact display form of a timestamp for the "Compact Timestamps" setting: month-abbrev, day,
+ * time, and milliseconds — no year or UTC offset (per spec, since both are rarely useful for a
+ * live session log), e.g. "Aug 31 14:23:01.123". Takes a `Date` (already re-parsed from the stored
+ * full `toLocalIsoString` string by the caller) rather than reading the clock itself, so this stays
+ * a pure, deterministic display transform. */
+export function toLocalCompactString(date: Date): string {
+  const pad = (value: number, width = 2) => String(value).padStart(width, '0');
+  return (
+    `${MONTH_ABBREVIATIONS[date.getMonth()]} ${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`
+  );
+}
+
 /** Builds the shared `[timestamp] DIRECTION MODE` header used by both the terminal (when "Show
  * timestamp" is on) and the file log (always) — same fixed length on every line since `timestamp`
  * is already zero-padded/fixed-offset (see `toLocalIsoString`), `direction` is always 2 characters,
- * and `mode` is padded to `MODE_WIDTH`. */
-export function formatTrafficHeader(timestamp: string, direction: 'TX' | 'RX', hex: boolean): string {
-  return `[${timestamp}] ${direction} ${(hex ? 'HEX' : 'ASCII').padEnd(MODE_WIDTH)}`;
+ * and `mode` is padded to `MODE_WIDTH`. `compact`, when true, re-parses the stored `timestamp`
+ * string (always the full `toLocalIsoString` form — the source of truth, never mutated by this
+ * setting) via `toLocalCompactString` for display — a pure, live, display-time transform, so
+ * flipping the "Compact Timestamps" setting never retroactively changes an already-rendered or
+ * already-logged line. */
+export function formatTrafficHeader(timestamp: string, direction: 'TX' | 'RX', hex: boolean, compact: boolean): string {
+  const displayTimestamp = compact ? toLocalCompactString(new Date(timestamp)) : timestamp;
+  return `[${displayTimestamp}] ${direction} ${(hex ? 'HEX' : 'ASCII').padEnd(MODE_WIDTH)}`;
 }
 
 /**
@@ -142,6 +195,43 @@ export function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   out.set(a, 0);
   out.set(b, a.length);
   return out;
+}
+
+/** Number of bytes a UTF-8 lead byte declares its sequence will occupy (1-4), or 0 if `byte` is not
+ * a valid lead byte (e.g. it's a continuation byte, 0x80-0xBF, or one of the invalid 0xF8-0xFF). */
+function utf8SequenceLength(byte: number): number {
+  if (byte < 0x80) return 1;
+  if ((byte & 0xe0) === 0xc0) return 2;
+  if ((byte & 0xf0) === 0xe0) return 3;
+  if ((byte & 0xf8) === 0xf0) return 4;
+  return 0;
+}
+
+/**
+ * Scans the tail of `data` (up to the last 4 bytes, the longest possible UTF-8 sequence) for a
+ * lead byte whose declared sequence length extends past the end of the buffer, and splits it off
+ * as `pending`. This is what lets a multi-byte UTF-8 character (e.g. any Chinese character) render
+ * correctly even when the underlying `serialport` `'data'` event splits it mid-character: the
+ * caller holds `pending` back and prepends it to the next chunk before decoding again, instead of
+ * feeding each half to the UTF-8 decoder independently (which would render each half as U+FFFD).
+ */
+export function splitTrailingIncompleteUtf8(data: Uint8Array): { complete: Uint8Array; pending: Uint8Array } {
+  const searchFrom = Math.max(0, data.length - 4);
+  for (let start = data.length - 1; start >= searchFrom; start--) {
+    const byte = data[start];
+    if ((byte & 0xc0) === 0x80) {
+      continue; // continuation byte; keep scanning back toward its lead byte
+    }
+    const len = utf8SequenceLength(byte);
+    if (len === 0) {
+      return { complete: data, pending: new Uint8Array(0) }; // not a UTF-8 lead byte; nothing to carry
+    }
+    if (start + len > data.length) {
+      return { complete: data.slice(0, start), pending: data.slice(start) }; // sequence cut off at the end
+    }
+    return { complete: data, pending: new Uint8Array(0) }; // sequence already complete within this chunk
+  }
+  return { complete: data, pending: new Uint8Array(0) };
 }
 
 /**

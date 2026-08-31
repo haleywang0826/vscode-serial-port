@@ -14,6 +14,9 @@
     defaultConfig: { baudRate: 115200, dataBits: 8, parity: 'none', stopBits: 1 },
     defaultHexSend: false,
     defaultHexRecv: false,
+    defaultShowTimestamp: false,
+    compactTimestamps: true,
+    messageGapMs: 20,
     txColor: '#00cccc',
     rxColor: '#33cc33',
     saveLogAt: '${workspaceFolder}/serial_logs',
@@ -380,6 +383,14 @@
                   <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexRecv" ${lastState.defaultHexRecv ? 'checked' : ''}> Hex Receive</label>
                 </div>
                 <div class="row">
+                  <label><input type="checkbox" data-action="default-checkbox" data-checkbox="showTimestamp" ${lastState.defaultShowTimestamp ? 'checked' : ''}> Show Timestamp</label>
+                  <label><input type="checkbox" data-action="default-checkbox" data-checkbox="compactTimestamps" ${lastState.compactTimestamps ? 'checked' : ''}> Compact Timestamps</label>
+                </div>
+                <div class="row">
+                  <label>Message Gap (ms)</label>
+                  <input type="number" min="0" data-action="message-gap-ms" value="${lastState.messageGapMs}">
+                </div>
+                <div class="row">
                   <label>TX Color</label>
                   <input type="color" data-action="terminal-color" data-which="tx" value="${lastState.txColor}">
                   <label>RX Color</label>
@@ -464,6 +475,14 @@
     }
     if (el.matches('[data-action="default-checkbox"]')) {
       postMessage({ type: 'updateDefaultCheckbox', checkbox: el.dataset.checkbox, value: el.checked });
+      return;
+    }
+    if (el.matches('[data-action="message-gap-ms"]')) {
+      const value = Number(el.value);
+      if (!Number.isFinite(value) || value < 0) {
+        return;
+      }
+      postMessage({ type: 'updateMessageGapMs', value });
       return;
     }
     if (el.matches('[data-action="terminal-color"]')) {

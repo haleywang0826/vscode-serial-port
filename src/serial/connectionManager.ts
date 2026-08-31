@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SerialPort } from 'serialport';
-import { formatBytes, formatTrafficHeader } from './format';
+import { concatBytes, formatBytes, formatTrafficHeader, splitTrailingIncompleteUtf8 } from './format';
 
 export type Parity = 'none' | 'even' | 'odd' | 'mark' | 'space';
 
@@ -33,6 +33,21 @@ export interface TrafficEvent {
   bytes: Uint8Array;
   timestamp: string;
   hex: boolean;
+}
+
+/** User-configurable format/timing settings, shared by reference into every open `PortConnection`
+ * (and, for `compactTimestamps`, into every open terminal too) — same shared-mutable-object
+ * pattern `TerminalColors` already uses in `pseudoterminal.ts`, so a live Default Settings change
+ * applies to already-open sessions without reopening the port. Every read happens at format/flush
+ * time (never captured onto the event itself), so a change only ever affects lines rendered/logged
+ * from that point on, never retroactively. */
+export interface FormatSettings {
+  compactTimestamps: boolean;
+  /** How long (ms) of quiet on the wire delimits one "message" from the next — incoming bytes are
+   * buffered and coalesced into a single `TrafficEvent` until this much time passes with nothing
+   * new arriving. Also the window during which a multi-byte UTF-8 character split across two
+   * `serialport` `'data'` reads is held back rather than decoded prematurely. See `handleIncoming`. */
+  messageGapMs: number;
 }
 
 const LOG_FLUSH_DEBOUNCE_MS = 300;
@@ -102,6 +117,10 @@ export class PortConnection {
    * prior open's. */
   private historyText = '';
 
+  /** Raw bytes accumulated since the last RX flush — see `handleIncoming`/`flushRxBuffer`. */
+  private rxBuffer: Uint8Array = new Uint8Array(0);
+  private rxFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
   private readonly onDidTrafficEmitter = new vscode.EventEmitter<TrafficEvent>();
   /** Fires for every TX (typed or template-sent) and RX event, so any live view always sees
    * everything that touches the wire, not just what it happened to write itself. */
@@ -114,7 +133,11 @@ export class PortConnection {
   /** Fires on stats/config/checkbox changes so the tree can refresh this session's node. */
   readonly onDidUpdate = this.onDidUpdateEmitter.event;
 
-  constructor(path: string, config: PortConfig) {
+  constructor(
+    path: string,
+    config: PortConfig,
+    private readonly formatSettings: FormatSettings,
+  ) {
     this.path = path;
     this.config = config;
     this.port = new SerialPort({
@@ -225,8 +248,11 @@ export class PortConnection {
         this.logFileUriInternal = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
         if (this.historyText) {
           this.logBuffer += this.historyText;
-          this.scheduleLogFlush();
         }
+        // Force an immediate (non-debounced) flush so the file is physically created the moment
+        // RF is checked + the port is open, rather than waiting for the first byte of traffic —
+        // `flushLogFile`'s empty-buffer guard is bypassed via `force` for exactly this case.
+        this.scheduleLogFlush(true);
       }
     } else if (!value) {
       this.flushLogFile();
@@ -293,6 +319,11 @@ export class PortConnection {
   }
 
   dispose(): void {
+    if (this.rxFlushTimer) {
+      clearTimeout(this.rxFlushTimer);
+      this.rxFlushTimer = undefined;
+    }
+    this.flushRxBuffer(true);
     this.flushLogFile();
     if (this.logFlushTimer) {
       clearTimeout(this.logFlushTimer);
@@ -307,14 +338,47 @@ export class PortConnection {
     this.onDidUpdateEmitter.dispose();
   }
 
+  /** Coalesces raw `serialport` `'data'` chunks over `formatSettings.messageGapMs` of quiet before
+   * turning them into a `TrafficEvent` — this is what lets a single logical "message" that arrives
+   * as several OS-level reads (and, more importantly, a multi-byte UTF-8 character split across
+   * two reads — see `splitTrailingIncompleteUtf8`) render as one coherent line instead of several
+   * garbled fragments. Byte counters and `onDidUpdate` still fire immediately on raw arrival (each
+   * new chunk resets the debounce timer), so the stats display stays live even while a message is
+   * still being assembled. */
   private handleIncoming(chunk: Buffer): void {
     const bytes = new Uint8Array(chunk);
+    this.stats.bytesReceived += bytes.length;
+    this.onDidUpdateEmitter.fire();
+    this.rxBuffer = concatBytes(this.rxBuffer, bytes);
+    if (this.rxFlushTimer) {
+      clearTimeout(this.rxFlushTimer);
+    }
+    this.rxFlushTimer = setTimeout(() => {
+      this.rxFlushTimer = undefined;
+      this.flushRxBuffer();
+    }, this.formatSettings.messageGapMs);
+  }
+
+  /** Turns the accumulated `rxBuffer` into one `TrafficEvent`. Normally holds back a trailing
+   * incomplete UTF-8 sequence (see `splitTrailingIncompleteUtf8`) until it's complete; `force`
+   * (used on dispose/port-close) flushes everything immediately instead, so buffered trailing
+   * bytes are never silently dropped when the connection is going away. */
+  private flushRxBuffer(force = false): void {
+    if (this.rxBuffer.length === 0) {
+      return;
+    }
+    const { complete, pending } = force
+      ? { complete: this.rxBuffer, pending: new Uint8Array(0) }
+      : splitTrailingIncompleteUtf8(this.rxBuffer);
+    this.rxBuffer = pending;
+    if (complete.length === 0) {
+      return;
+    }
     const timestamp = toLocalIsoString(new Date());
     const hex = this.hexRecv;
-    this.stats.bytesReceived += bytes.length;
-    const event: TrafficEvent = { direction: 'RX', bytes, timestamp, hex };
+    const event: TrafficEvent = { direction: 'RX', bytes: complete, timestamp, hex };
     this.appendLog(event);
-    this.appendHistory(bytes, hex);
+    this.appendHistory(complete, hex);
     this.onDidTrafficEmitter.fire(event);
     this.onDidUpdateEmitter.fire();
   }
@@ -331,7 +395,7 @@ export class PortConnection {
    * carry no header. */
   private writeLogLine(direction: 'TX' | 'RX', bytes: Uint8Array, timestamp: string, hex: boolean): void {
     const formatted = formatBytes(bytes, hex);
-    const line = `${formatTrafficHeader(timestamp, direction, hex)} ${formatted}`;
+    const line = `${formatTrafficHeader(timestamp, direction, hex, this.formatSettings.compactTimestamps)} ${formatted}`;
     if (this.logFileUriInternal) {
       this.logBuffer += line + '\n';
       this.scheduleLogFlush();
@@ -354,7 +418,18 @@ export class PortConnection {
     }
   }
 
-  private scheduleLogFlush(): void {
+  /** Debounces a log write; `force` (used to eagerly create the log file the instant RF is
+   * checked + the port opens, even with nothing buffered yet) bypasses the debounce and flushes
+   * immediately instead of waiting `LOG_FLUSH_DEBOUNCE_MS`. */
+  private scheduleLogFlush(force = false): void {
+    if (force) {
+      if (this.logFlushTimer) {
+        clearTimeout(this.logFlushTimer);
+        this.logFlushTimer = undefined;
+      }
+      this.flushLogFile(true);
+      return;
+    }
     if (this.logFlushTimer) {
       return;
     }
@@ -364,8 +439,10 @@ export class PortConnection {
     }, LOG_FLUSH_DEBOUNCE_MS);
   }
 
-  private flushLogFile(): void {
-    if (!this.logFileUriInternal || this.logBuffer.length === 0) {
+  /** `force` bypasses the empty-buffer guard so a log file can be created on disk the moment
+   * recording starts, even before any traffic has occurred yet. */
+  private flushLogFile(force = false): void {
+    if (!this.logFileUriInternal || (this.logBuffer.length === 0 && !force)) {
       return;
     }
     const uri = this.logFileUriInternal;
@@ -408,7 +485,7 @@ export class ConnectionManager {
     return this.connections.has(path);
   }
 
-  async open(path: string, config: PortConfig): Promise<PortConnection> {
+  async open(path: string, config: PortConfig, formatSettings: FormatSettings): Promise<PortConnection> {
     const existing = this.connections.get(path);
     if (existing) {
       return existing;
@@ -418,7 +495,7 @@ export class ConnectionManager {
       return inFlight;
     }
     const openPromise = (async () => {
-      const connection = new PortConnection(path, config);
+      const connection = new PortConnection(path, config, formatSettings);
       try {
         await connection.open();
       } finally {

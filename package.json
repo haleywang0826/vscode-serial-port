@@ -113,6 +113,22 @@
           "default": false,
           "description": "Default Hex Receive state used when a newly added port is opened."
         },
+        "serialPort.defaultShowTimestamp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default Show Timestamp state used when a newly added port is opened."
+        },
+        "serialPort.compactTimestamps": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render timestamps in a compact form (month, day, time, milliseconds — no year or UTC offset) in the terminal and log file. Only affects lines rendered/logged after the setting changes; already-rendered lines are never altered."
+        },
+        "serialPort.messageGapMs": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "description": "Milliseconds of quiet time on the wire used to delimit one received message from the next, so a single message split across multiple physical reads is coalesced into one line instead of rendering as several."
+        },
         "serialPort.saveLogAt": {
           "type": "string",
           "default": "${workspaceFolder}/serial_logs",
