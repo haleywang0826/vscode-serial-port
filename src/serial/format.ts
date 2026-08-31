@@ -5,9 +5,31 @@ export function bytesToHex(data: Uint8Array): string {
   return Array.from(data, (byte) => byte.toString(16).toUpperCase().padStart(2, '0')).join(' ');
 }
 
-/** Renders bytes as text, replacing non-printable control characters with '.'. */
+/**
+ * Renders bytes as text: a CRLF pair or a lone CR/LF becomes one real line break ('\n'), a Tab
+ * passes through as a literal '\t', and any other non-printable control character renders as '.'.
+ * Never mutates the underlying bytes — this only affects the display string built from them.
+ */
 export function bytesToAscii(data: Uint8Array): string {
-  return Array.from(data, (byte) => (byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.')).join('');
+  let out = '';
+  for (let i = 0; i < data.length; i++) {
+    const byte = data[i];
+    if (byte === 0x0d && data[i + 1] === 0x0a) {
+      out += '\n';
+      i++;
+      continue;
+    }
+    if (byte === 0x0d || byte === 0x0a) {
+      out += '\n';
+      continue;
+    }
+    if (byte === 0x09) {
+      out += '\t';
+      continue;
+    }
+    out += byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.';
+  }
+  return out;
 }
 
 export function formatBytes(data: Uint8Array, hex: boolean): string {
@@ -40,6 +62,19 @@ export function bytesToAsciiForTerminal(data: Uint8Array): string {
         continue;
       }
     }
+    if (byte === 0x0d && data[i + 1] === 0x0a) {
+      out += '\r\n'; // raw-mode pty needs an explicit CR to return to column 1
+      i++;
+      continue;
+    }
+    if (byte === 0x0d || byte === 0x0a) {
+      out += '\r\n';
+      continue;
+    }
+    if (byte === 0x09) {
+      out += '\t';
+      continue;
+    }
     out += byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.';
   }
   return out;
@@ -48,6 +83,18 @@ export function bytesToAsciiForTerminal(data: Uint8Array): string {
 /** Like `formatBytes`, but renders ascii mode via `bytesToAsciiForTerminal` for SGR passthrough. */
 export function formatBytesForTerminal(data: Uint8Array, hex: boolean): string {
   return hex ? bytesToHex(data) : bytesToAsciiForTerminal(data);
+}
+
+/** "HEX".padEnd/"ASCII".padEnd width — the longer of the two mode labels, so the header below is
+ * always exactly the same length regardless of mode, keeping columns aligned line-to-line. */
+const MODE_WIDTH = 5;
+
+/** Builds the shared `[timestamp] DIRECTION MODE` header used by both the terminal (when "Show
+ * timestamp" is on) and the file log (always) — same fixed length on every line since `timestamp`
+ * is already zero-padded/fixed-offset (see `toLocalIsoString`), `direction` is always 2 characters,
+ * and `mode` is padded to `MODE_WIDTH`. */
+export function formatTrafficHeader(timestamp: string, direction: 'TX' | 'RX', hex: boolean): string {
+  return `[${timestamp}] ${direction} ${(hex ? 'HEX' : 'ASCII').padEnd(MODE_WIDTH)}`;
 }
 
 /**

@@ -215,14 +215,16 @@
                 <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="hexRecv" ${session.hexRecv ? 'checked' : ''}> Hex Receive</label>
               </div>
             </div>
-            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''} ${session.connected ? '' : 'disabled title="Open the port to record"'}> Record to File</label>
+            <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="record" ${session.recording ? 'checked' : ''}> Record to File</label>
             <label><input type="checkbox" data-action="checkbox" data-path="${escapeHtml(session.path)}" data-checkbox="showTimestamp" ${session.showTimestamp ? 'checked' : ''}> Show Timestamp</label>
           </div>
           ${
-            session.logFilePath
+            session.recording || session.logFilePath
               ? `<div class="log-line muted">
-                  <span class="truncate" title="${escapeHtml(session.logFilePath)}">${escapeHtml(session.logFilePath)}</span>
-                  <button class="icon-button" data-action="open-log-file" data-path="${escapeHtml(session.logFilePath)}" title="Open Log File"><i class="codicon codicon-link-external"></i></button>
+                  <span class="truncate" title="${escapeHtml(session.logFilePath ?? '')}">${
+                    session.logFilePath ? escapeHtml(session.logFilePath) : 'Log file will be created once the port is opened.'
+                  }</span>
+                  <button class="icon-button" data-action="open-log-file" data-uri="${escapeHtml(session.logFileUri ?? '')}" title="Open Log File"><i class="codicon codicon-link-external"></i></button>
                 </div>`
               : ''
           }
@@ -528,7 +530,7 @@
         postMessage({ type: 'clearLogFolder' });
         break;
       case 'open-log-file':
-        postMessage({ type: 'openLogFile', path: el.dataset.path });
+        postMessage({ type: 'openLogFile', uri: el.dataset.uri || undefined });
         break;
       case 'toggle-default-settings':
         ui.defaultSettingsCollapsed = !ui.defaultSettingsCollapsed;

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SerialPort } from 'serialport';
-import { formatBytes } from './format';
+import { formatBytes, formatTrafficHeader } from './format';
 
 export type Parity = 'none' | 'even' | 'odd' | 'mark' | 'space';
 
@@ -24,11 +24,15 @@ export interface PortStats {
 }
 
 /** One TX/RX event: raw bytes plus the single timestamp computed for it, shared by the file log
- * and any live display so the two never disagree or compute it independently. */
+ * and any live display so the two never disagree or compute it independently. `hex` is the
+ * send/recv mode that was active at the moment this event happened (not necessarily the
+ * connection's *current* mode, which can change mid-session) — captured per-event so history
+ * playback (see `PortConnection.history`) always renders each line the way it actually looked. */
 export interface TrafficEvent {
   direction: 'TX' | 'RX';
   bytes: Uint8Array;
   timestamp: string;
+  hex: boolean;
 }
 
 const LOG_FLUSH_DEBOUNCE_MS = 300;
@@ -37,6 +41,11 @@ const LOG_FLUSH_DEBOUNCE_MS = 300;
  * option (it always replaces full file contents), so the alternative is rewriting the *entire*
  * session's log on every flush, an unbounded and ever-growing cost. */
 const LOG_ROTATE_BYTES = 4 * 1024 * 1024;
+/** Cap on the in-memory per-connection traffic history (see `PortConnection.history`), kept for
+ * every session — open or not yet recording — so that enabling "Record to File" mid-session can
+ * backfill everything shown so far. Bounded the same way log rotation is, so a long-lived,
+ * never-recorded session can't grow this without limit. */
+const HISTORY_MAX_BYTES = 4 * 1024 * 1024;
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -75,13 +84,20 @@ export class PortConnection {
   readonly stats: PortStats = { bytesSent: 0, bytesReceived: 0 };
 
   private readonly port: SerialPort;
-  private logFileUri: vscode.Uri | undefined;
+  private logFileUriInternal: vscode.Uri | undefined;
   private logFolderUri: vscode.Uri | undefined;
   private logBuffer = '';
   private logFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private logFlushChain: Promise<void> = Promise.resolve();
   private logDirReady: Promise<void> = Promise.resolve();
   private controlLineChain: Promise<void> = Promise.resolve();
+  /** Every TX/RX event this connection instance has ever seen, capped to `HISTORY_MAX_BYTES`.
+   * Populated unconditionally (not just while recording) so turning "Record to File" on mid-session
+   * can back-fill the log with everything already shown — see `setRecording`. Scoped to this
+   * connection *instance*, so a fresh reopen naturally starts with an empty history and a later RF
+   * enable only ever backfills that reopen's own traffic, never a prior open's. */
+  private readonly history: TrafficEvent[] = [];
+  private historyBytes = 0;
 
   private readonly onDidTrafficEmitter = new vscode.EventEmitter<TrafficEvent>();
   /** Fires for every TX (typed or template-sent) and RX event, so any live view always sees
@@ -138,9 +154,12 @@ export class PortConnection {
           return;
         }
         const timestamp = toLocalIsoString(new Date());
+        const hex = this.hexSend;
         this.stats.bytesSent += bytes.length;
-        this.appendLog('TX', bytes, timestamp);
-        this.onDidTrafficEmitter.fire({ direction: 'TX', bytes, timestamp });
+        const event: TrafficEvent = { direction: 'TX', bytes, timestamp, hex };
+        this.appendLog(event);
+        this.pushHistory(event);
+        this.onDidTrafficEmitter.fire(event);
         this.onDidUpdateEmitter.fire();
         resolve();
       });
@@ -172,7 +191,17 @@ export class PortConnection {
     this.onDidUpdateEmitter.fire();
   }
 
-  setRecording(value: boolean, logFolderUri?: vscode.Uri): void {
+  /**
+   * Turns recording on/off. `reuseFileUri`, when given, points at an already-known log file (the
+   * same session's file from before it was last closed) instead of starting a new one — this is
+   * what lets a close/reopen with RF already checked keep appending to the SAME file rather than
+   * fragmenting into a new one each time. Omitting it (the default — used when the user flips the
+   * checkbox on live, whether the port is open or not) starts a fresh file and backfills it with
+   * this connection instance's own `history` so far, covering the whole communication period
+   * already shown; since `history` is scoped to this connection instance, a reopened connection's
+   * empty history means turning RF on after a reopen only ever backfills that reopen's own traffic.
+   */
+  setRecording(value: boolean, logFolderUri?: vscode.Uri, reuseFileUri?: vscode.Uri): void {
     this.recording = value;
     if (value && logFolderUri) {
       this.logFolderUri = logFolderUri;
@@ -183,8 +212,15 @@ export class PortConnection {
           vscode.window.showErrorMessage(`Failed to create log folder: ${errorMessage(err)}`);
         }
       })();
-      this.logFileUri = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
       this.logBuffer = '';
+      if (reuseFileUri) {
+        this.logFileUriInternal = reuseFileUri;
+      } else {
+        this.logFileUriInternal = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
+        for (const event of this.history) {
+          this.writeLogLine(event.direction, event.bytes, event.timestamp, event.hex);
+        }
+      }
     } else if (!value) {
       this.flushLogFile();
     }
@@ -239,7 +275,14 @@ export class PortConnection {
   }
 
   get logFilePath(): string | undefined {
-    return this.logFileUri?.fsPath;
+    return this.logFileUriInternal?.fsPath;
+  }
+
+  /** The log file's full URI (scheme + authority preserved), for callers that need a lossless
+   * round-trip — e.g. reopening it via `vscode.window.showTextDocument` on a remote (WSL/SSH)
+   * workspace, where the lossy `.fsPath` string above would silently discard the remote scheme. */
+  get logFileUri(): vscode.Uri | undefined {
+    return this.logFileUriInternal;
   }
 
   dispose(): void {
@@ -260,21 +303,43 @@ export class PortConnection {
   private handleIncoming(chunk: Buffer): void {
     const bytes = new Uint8Array(chunk);
     const timestamp = toLocalIsoString(new Date());
+    const hex = this.hexRecv;
     this.stats.bytesReceived += bytes.length;
-    this.appendLog('RX', bytes, timestamp);
-    this.onDidTrafficEmitter.fire({ direction: 'RX', bytes, timestamp });
+    const event: TrafficEvent = { direction: 'RX', bytes, timestamp, hex };
+    this.appendLog(event);
+    this.pushHistory(event);
+    this.onDidTrafficEmitter.fire(event);
     this.onDidUpdateEmitter.fire();
   }
 
-  private appendLog(direction: 'TX' | 'RX', bytes: Uint8Array, timestamp: string): void {
+  private appendLog(event: TrafficEvent): void {
     if (!this.recording) {
       return;
     }
-    const formatted = formatBytes(bytes, direction === 'TX' ? this.hexSend : this.hexRecv);
-    const line = `[${timestamp}] ${direction}: ${formatted}`;
-    if (this.logFileUri) {
+    this.writeLogLine(event.direction, event.bytes, event.timestamp, event.hex);
+  }
+
+  /** Appends one already-known event to the log buffer, independent of `this.recording` — shared
+   * by live `appendLog` and `setRecording`'s backfill-from-history path. */
+  private writeLogLine(direction: 'TX' | 'RX', bytes: Uint8Array, timestamp: string, hex: boolean): void {
+    const formatted = formatBytes(bytes, hex);
+    const line = `${formatTrafficHeader(timestamp, direction, hex)} ${formatted}`;
+    if (this.logFileUriInternal) {
       this.logBuffer += line + '\n';
       this.scheduleLogFlush();
+    }
+  }
+
+  /** Records `event` into the bounded in-memory history (see `history` field), regardless of
+   * whether recording is currently on, so a later "Record to File" enable can backfill it. */
+  private pushHistory(event: TrafficEvent): void {
+    this.history.push(event);
+    this.historyBytes += event.bytes.length;
+    while (this.historyBytes > HISTORY_MAX_BYTES && this.history.length > 1) {
+      const removed = this.history.shift();
+      if (removed) {
+        this.historyBytes -= removed.bytes.length;
+      }
     }
   }
 
@@ -289,10 +354,10 @@ export class PortConnection {
   }
 
   private flushLogFile(): void {
-    if (!this.logFileUri || this.logBuffer.length === 0) {
+    if (!this.logFileUriInternal || this.logBuffer.length === 0) {
       return;
     }
-    const uri = this.logFileUri;
+    const uri = this.logFileUriInternal;
     const content = Buffer.from(this.logBuffer, 'utf8');
     this.logFlushChain = this.logFlushChain
       .then(() => this.logDirReady)
@@ -302,7 +367,7 @@ export class PortConnection {
       });
     if (content.byteLength >= LOG_ROTATE_BYTES && this.logFolderUri) {
       // Start a fresh segment so future flushes don't need to resend everything written so far.
-      this.logFileUri = vscode.Uri.joinPath(this.logFolderUri, buildLogFileName(this.path));
+      this.logFileUriInternal = vscode.Uri.joinPath(this.logFolderUri, buildLogFileName(this.path));
       this.logBuffer = '';
     }
   }

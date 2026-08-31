@@ -5,6 +5,7 @@ import {
   asciiStringToBytes,
   concatBytes,
   formatBytesForTerminal,
+  formatTrafficHeader,
   hexStringToBytes,
   isHexDigitChar,
   splitTrailingEscape,
@@ -23,6 +24,20 @@ const ERROR_COLOR = '\x1b[31m';
 
 export interface SerialTerminal {
   terminal: vscode.Terminal;
+  /** (Re)binds this terminal to a live connection: subscribes to its traffic/update/close events,
+   * unblocks input, and prints a "Connected" banner. No-op if already attached to a live
+   * connection. */
+  attach(connection: PortConnection): void;
+  /** Unbinds from the current connection (if any): unsubscribes, blocks input, and prints a
+   * "disconnected" banner. Does NOT close the terminal itself — the session (and its terminal)
+   * stay present so the port can be reopened into this same terminal later. No-op if already
+   * detached. */
+  detach(): void;
+  /** Fires when the pty's `close` callback runs because VS Code is tearing down the terminal for a
+   * genuine user action (clicking its kill icon, "Terminal: Kill") — NOT when our own `dispose()`
+   * caused it (see the `disposing` guard below). This is the one signal that should actually remove
+   * the session from the panel. */
+  onDidUserClose: vscode.Event<void>;
   dispose(): void;
 }
 
@@ -35,13 +50,19 @@ export interface TerminalColors {
 }
 
 /**
- * Creates an interactive terminal for one open port: renders every TX/RX event live (colored by
- * direction, formatted per the connection's hex/ascii toggles, optionally timestamped) and sends
- * whatever the user types on Enter. TX is rendered from the connection's `onDidTraffic` event, the
- * same source the file log reads from, so a template send (or any other write) shows up here too —
- * not just terminal-typed input. While "hex send" is on, non-hex-digit keystrokes are rejected as
- * they're typed, and a space is auto-inserted between each typed byte pair (see
- * `appendHexInputChar`) so the user never has to type the separating spaces themselves.
+ * Creates an interactive terminal for one session, identified by `path`. The terminal exists
+ * independent of whether the port is currently open — it starts (or falls back to) a disconnected
+ * state with input blocked, and `attach`/`detach` bind/unbind it to a live `PortConnection` as the
+ * port opens and closes, without ever recreating the underlying `vscode.Terminal`. This is what
+ * lets a session's terminal (and its scrollback) survive a close/reopen cycle.
+ *
+ * While attached, every TX/RX event is rendered live (colored by direction, formatted per the
+ * connection's hex/ascii toggles, optionally timestamped) and whatever the user types is sent on
+ * Enter. TX is rendered from the connection's `onDidTraffic` event, the same source the file log
+ * reads from, so a template send (or any other write) shows up here too — not just terminal-typed
+ * input. While "hex send" is on, non-hex-digit keystrokes are rejected as they're typed, and a
+ * space is auto-inserted between each typed byte pair (see `appendHexInputChar`) so the user never
+ * has to type the separating spaces themselves.
  *
  * The input line is pinned to the terminal's actual bottom row via an ANSI scroll region
  * (DECSTBM, `\x1b[<top>;<bottom>r`) confined to rows 1..rows-1 — the same mechanism tmux's status
@@ -53,24 +74,37 @@ export interface TerminalColors {
  * clear-screen binding, tmux, and other terminal-based tools, so it works the way anyone coming
  * from a terminal would expect without needing a separate extension command.
  */
-export function createSerialTerminal(connection: PortConnection, colors: TerminalColors): SerialTerminal {
+export function createSerialTerminal(path: string, colors: TerminalColors): SerialTerminal {
   const writeEmitter = new vscode.EventEmitter<string>();
   const closeEmitter = new vscode.EventEmitter<void>();
+  const userCloseEmitter = new vscode.EventEmitter<void>();
   let line = '';
   let rows = DEFAULT_ROWS;
   /** Bytes held back from the previous RX event because they looked like an incomplete ANSI CSI
    * (color) sequence at the very end of the chunk — prepended to the next RX event before
    * formatting, so a sequence split across two `serialport` `'data'` reads still renders as one
    * color escape instead of garbling as two half-sequences. Ascii mode only; hex mode and TX never
-   * carry anything over. */
+   * carry anything over. Reset on every (re)attach since a new connection starts a new byte stream. */
   let pendingRx: Uint8Array = new Uint8Array(0);
+
+  let connection: PortConnection | undefined;
+  let connected = false;
+  let opened = false;
+  /** Set before we call `terminal.dispose()` ourselves, so the resulting `pty.close()` callback
+   * (VS Code calls it either way) can tell "I disposed this" apart from a real user terminal-kill
+   * and skip firing `onDidUserClose` for the former. */
+  let disposing = false;
+
+  let trafficSub: vscode.Disposable | undefined;
+  let updateSub: vscode.Disposable | undefined;
+  let connectionCloseSub: vscode.Disposable | undefined;
 
   const setScrollRegion = (): void => {
     writeEmitter.fire(`\x1b[1;${rows - 1}r`);
   };
 
   const redrawInputLine = (): void => {
-    writeEmitter.fire(`\x1b[${rows};1H\x1b[2K${promptFor(connection)}${line}`);
+    writeEmitter.fire(`\x1b[${rows};1H\x1b[2K${promptFor()}${connected ? line : ''}`);
   };
 
   /** Writes text (must end `\r\n`) into the scroll region, then restores the pinned input line. */
@@ -79,21 +113,61 @@ export function createSerialTerminal(connection: PortConnection, colors: Termina
     redrawInputLine();
   };
 
-  const trafficSub = connection.onDidTraffic((event) => {
-    if (event.direction === 'RX' && !connection.hexRecv) {
-      const merged = pendingRx.length > 0 ? concatBytes(pendingRx, event.bytes) : event.bytes;
-      const { complete, pending } = splitTrailingEscape(merged);
-      pendingRx = pending;
-      printAboveInput(formatTrafficLine(connection, event, colors, complete));
+  function promptFor(): string {
+    if (!connected || !connection) {
+      return '(disconnected) ';
+    }
+    return connection.hexSend ? 'hex> ' : '> ';
+  }
+
+  function subscribeToConnection(conn: PortConnection): void {
+    trafficSub = conn.onDidTraffic((event) => {
+      if (event.direction === 'RX' && !event.hex) {
+        const merged = pendingRx.length > 0 ? concatBytes(pendingRx, event.bytes) : event.bytes;
+        const { complete, pending } = splitTrailingEscape(merged);
+        pendingRx = pending;
+        printAboveInput(formatTrafficLine(conn, event, colors, complete));
+        return;
+      }
+      pendingRx = new Uint8Array(0);
+      printAboveInput(formatTrafficLine(conn, event, colors));
+    });
+    updateSub = conn.onDidUpdate(() => redrawInputLine());
+    connectionCloseSub = conn.onDidClose(() => detach());
+  }
+
+  const attach = (conn: PortConnection): void => {
+    if (connected && connection === conn) {
       return;
     }
+    connection = conn;
+    connected = true;
+    line = '';
     pendingRx = new Uint8Array(0);
-    printAboveInput(formatTrafficLine(connection, event, colors));
-  });
+    subscribeToConnection(conn);
+    if (opened) {
+      printAboveInput(`Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`);
+    }
+  };
 
-  const updateSub = connection.onDidUpdate(() => redrawInputLine());
-
-  const connectionCloseSub = connection.onDidClose(() => closeEmitter.fire());
+  const detach = (): void => {
+    if (!connected) {
+      return;
+    }
+    connected = false;
+    trafficSub?.dispose();
+    updateSub?.dispose();
+    connectionCloseSub?.dispose();
+    trafficSub = undefined;
+    updateSub = undefined;
+    connectionCloseSub = undefined;
+    connection = undefined;
+    line = '';
+    pendingRx = new Uint8Array(0);
+    if (opened) {
+      printAboveInput('Port disconnected. Reopen to resume.\r\n');
+    }
+  };
 
   const pty: vscode.Pseudoterminal = {
     onDidWrite: writeEmitter.event,
@@ -102,12 +176,19 @@ export function createSerialTerminal(connection: PortConnection, colors: Termina
       if (initialDimensions) {
         rows = initialDimensions.rows;
       }
+      opened = true;
       setScrollRegion();
-      printAboveInput(`Connected to ${connection.path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`);
+      printAboveInput(
+        connected
+          ? `Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`
+          : `Port ${path} is closed. Open it in the Sessions panel to send/receive.\r\n`,
+      );
     },
     close: () => {
       writeEmitter.fire('\x1b[r');
-      void connection.close();
+      if (!disposing) {
+        userCloseEmitter.fire();
+      }
     },
     setDimensions: (dimensions) => {
       rows = dimensions.rows;
@@ -115,12 +196,16 @@ export function createSerialTerminal(connection: PortConnection, colors: Termina
       redrawInputLine();
     },
     handleInput: (data: string) => {
+      if (!connected || !connection) {
+        return; // input is blocked while disconnected
+      }
+      const activeConnection = connection;
       for (const ch of data) {
         if (ch === ENTER) {
           const sent = line;
           line = '';
           redrawInputLine();
-          void sendLine(connection, sent, printAboveInput);
+          void sendLine(activeConnection, sent, printAboveInput);
           continue;
         }
         if (ch === BACKSPACE) {
@@ -143,49 +228,52 @@ export function createSerialTerminal(connection: PortConnection, colors: Termina
         if (ch < ' ') {
           continue; // drop other control chars / escape sequences
         }
-        if (connection.hexSend && !isHexDigitChar(ch)) {
+        if (activeConnection.hexSend && !isHexDigitChar(ch)) {
           continue; // reject non-hex keystrokes silently; spaces between byte pairs are auto-inserted
         }
-        line = connection.hexSend ? appendHexInputChar(line, ch) : line + ch;
+        line = activeConnection.hexSend ? appendHexInputChar(line, ch) : line + ch;
         redrawInputLine();
       }
     },
   };
 
-  const terminal = vscode.window.createTerminal({ name: `Serial: ${connection.path}`, pty });
+  const terminal = vscode.window.createTerminal({ name: `Serial: ${path}`, pty });
 
   return {
     terminal,
+    attach,
+    detach,
+    onDidUserClose: userCloseEmitter.event,
     dispose: () => {
-      trafficSub.dispose();
-      updateSub.dispose();
-      connectionCloseSub.dispose();
+      disposing = true;
+      trafficSub?.dispose();
+      updateSub?.dispose();
+      connectionCloseSub?.dispose();
       writeEmitter.dispose();
       closeEmitter.dispose();
+      userCloseEmitter.dispose();
       terminal.dispose();
     },
   };
 }
 
-function promptFor(connection: PortConnection): string {
-  return connection.hexSend ? 'hex> ' : '> ';
-}
-
 /** Renders one TX/RX event for the terminal: colored by direction using the user-configured
- * `colors`, optionally prefixed with the shared timestamp from the event (the same value written
- * to the file log, never recomputed). `bytesOverride`, when given, replaces `event.bytes` — used
- * for RX-ascii-mode events whose bytes were merged/split against a carried-over ANSI escape
- * fragment (see `pendingRx` above). */
+ * `colors`, optionally prefixed with the shared header built from the event's own captured
+ * timestamp and mode (the same values written to the file log, never recomputed — see
+ * `formatTrafficHeader`). `bytesOverride`, when given, replaces `event.bytes` — used for
+ * RX-ascii-mode events whose bytes were merged/split against a carried-over ANSI escape fragment
+ * (see `pendingRx` above). */
 function formatTrafficLine(
   connection: PortConnection,
   event: TrafficEvent,
   colors: TerminalColors,
   bytesOverride?: Uint8Array,
 ): string {
-  const hex = event.direction === 'TX' ? connection.hexSend : connection.hexRecv;
   const color = ansiTruecolor(event.direction === 'TX' ? colors.tx : colors.rx);
-  const prefix = connection.showTimestamp ? `${DIM}[${event.timestamp}] ${event.direction}${RESET} ` : '';
-  return `${prefix}${color}${formatBytesForTerminal(bytesOverride ?? event.bytes, hex)}${RESET}\r\n`;
+  const prefix = connection.showTimestamp
+    ? `${DIM}${formatTrafficHeader(event.timestamp, event.direction, event.hex)}${RESET} `
+    : '';
+  return `${prefix}${color}${formatBytesForTerminal(bytesOverride ?? event.bytes, event.hex)}${RESET}\r\n`;
 }
 
 /** Converts a "#rrggbb" hex color into a 24-bit ANSI SGR foreground-color escape sequence.

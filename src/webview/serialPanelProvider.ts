@@ -40,7 +40,7 @@ type ClientMessage =
   | { type: 'sendTemplate'; id: string; path?: string }
   | { type: 'browseLogFolder' }
   | { type: 'clearLogFolder' }
-  | { type: 'openLogFile'; path: string };
+  | { type: 'openLogFile'; uri: string | undefined };
 
 /** Snapshot of a session's settings taken the moment its port closes (by any cause), so a
  * session card can survive the close and be reopened without losing its configuration. */
@@ -51,7 +51,14 @@ interface StoredSessionMeta {
   showTimestamp: boolean;
   rts: boolean;
   dtr: boolean;
+  /** Whether "Record to File" was checked — kept independent of `connected` so it can be set (and
+   * shown checked) while the port is closed; only takes effect once the port is opened again. */
+  recording: boolean;
   logFilePath: string | undefined;
+  /** Full `Uri.toString()` of the log file (scheme + authority preserved), used to reopen the
+   * SAME file on a reopen with recording already on, and to open it losslessly on a remote
+   * workspace — see `logFilePath`, which is display-only and lossy for that purpose. */
+  logFileUri: string | undefined;
   stats: { bytesSent: number; bytesReceived: number };
 }
 
@@ -66,6 +73,7 @@ interface PanelSession {
   rts: boolean;
   dtr: boolean;
   logFilePath: string | undefined;
+  logFileUri: string | undefined;
   stats: { bytesSent: number; bytesReceived: number };
 }
 
@@ -123,8 +131,13 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     for (const [path, meta] of Object.entries(storedMeta)) {
       this.closedMeta.set(path, meta);
     }
+    // Every persisted session gets its terminal recreated immediately on activation — not lazily on
+    // first open — so a session that's currently closed still has a terminal present right away.
+    for (const path of this.sessionOrder) {
+      this.getOrCreateTerminal(path);
+    }
     this.subscriptions.push(connections.onDidChange(() => this.scheduleStateRefresh()));
-    this.subscriptions.push(connections.onDidChange(() => this.pruneClosedTerminals()));
+    this.subscriptions.push(connections.onDidChange(() => this.syncTerminalConnections()));
     this.terminalColors.tx = this.config().get<string>('txColor', DEFAULT_TX_COLOR);
     this.terminalColors.rx = this.config().get<string>('rxColor', DEFAULT_RX_COLOR);
     this.subscriptions.push(
@@ -183,7 +196,9 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       showTimestamp: previous?.showTimestamp ?? false,
       rts: previous?.rts ?? false,
       dtr: previous?.dtr ?? false,
+      recording: previous?.recording ?? false,
       logFilePath: previous?.logFilePath,
+      logFileUri: previous?.logFileUri,
       stats: previous?.stats ?? { bytesSent: 0, bytesReceived: 0 },
     };
   }
@@ -310,8 +325,14 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           );
         break;
       case 'openLogFile':
+        if (!message.uri) {
+          vscode.window.showInformationMessage(
+            'The log file has not been created yet — it is created once the port is opened while Record to File is checked.',
+          );
+          break;
+        }
         void vscode.window
-          .showTextDocument(vscode.Uri.file(message.path))
+          .showTextDocument(vscode.Uri.parse(message.uri))
           .then(undefined, (err) => vscode.window.showErrorMessage(`Failed to open log file: ${errorMessage(err)}`));
         break;
     }
@@ -336,6 +357,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       this.sessionOrder.push(path);
       this.persistSessions();
     }
+    this.getOrCreateTerminal(path);
     if (this.connections.isOpen(path)) {
       vscode.window.showInformationMessage(`${path} is already open.`);
       this.postState();
@@ -353,14 +375,43 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     }
   }
 
-  private async removeSession(path: string): Promise<void> {
+  /** Removes a session for good: closes the port if open, strips its persisted state, and — unless
+   * `disposeTerminal` is explicitly false — disposes its terminal too. The "Remove" button in the
+   * panel always disposes (the default); `getOrCreateTerminal`'s `onDidUserClose` subscription
+   * passes `disposeTerminal: false` since the terminal is already being torn down by VS Code itself
+   * (or by our own `dispose()`) at that point — calling `dispose()` again would be redundant. */
+  private async removeSession(path: string, opts: { disposeTerminal?: boolean } = {}): Promise<void> {
+    const disposeTerminal = opts.disposeTerminal ?? true;
     if (this.connections.isOpen(path)) {
       await this.connections.close(path);
     }
     this.sessionOrder = this.sessionOrder.filter((p) => p !== path);
     this.closedMeta.delete(path);
     this.persistSessions();
+    if (disposeTerminal) {
+      const terminal = this.terminals.get(path);
+      terminal?.dispose();
+      this.terminals.delete(path);
+    }
     this.postState();
+  }
+
+  /** Returns the session's persistent terminal, creating it (in the disconnected state) if this is
+   * the first time this path has needed one. A session's terminal survives for as long as the
+   * session itself exists in the panel — see the module-level design note in `pseudoterminal.ts`. */
+  private getOrCreateTerminal(path: string): SerialTerminal {
+    const existing = this.terminals.get(path);
+    if (existing) {
+      return existing;
+    }
+    const terminal = createSerialTerminal(path, this.terminalColors);
+    terminal.onDidUserClose(() => {
+      if (this.sessionOrder.includes(path)) {
+        void this.removeSession(path, { disposeTerminal: false });
+      }
+    });
+    this.terminals.set(path, terminal);
+    return terminal;
   }
 
   /** Opens (or reopens) a port, restoring its last-known config/hex settings if it was
@@ -394,15 +445,27 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           showTimestamp: connection.showTimestamp,
           rts: connection.rts,
           dtr: connection.dtr,
+          recording: connection.recording,
           logFilePath: connection.logFilePath,
+          logFileUri: connection.logFileUri?.toString(),
           stats: { ...connection.stats },
         });
         this.persistSessions();
       });
       this.closedMeta.delete(path);
       this.persistSessions();
-      const terminal = createSerialTerminal(connection, this.terminalColors);
-      this.terminals.set(path, terminal);
+      if (meta?.recording) {
+        // RF was already checked before this open (or survives from a prior open of the same
+        // session) — reuse the same file (if one exists yet) rather than starting a new one, so a
+        // close/reopen cycle with RF on keeps appending to a single file instead of fragmenting.
+        connection.setRecording(
+          true,
+          this.resolveLogFolderUri(),
+          meta.logFileUri ? vscode.Uri.parse(meta.logFileUri) : undefined,
+        );
+      }
+      const terminal = this.getOrCreateTerminal(path);
+      terminal.attach(connection);
       terminal.terminal.show(false);
     } catch (err) {
       vscode.window.showErrorMessage(`Failed to open ${path}: ${errorMessage(err)}`);
@@ -525,14 +588,19 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       }
       return;
     }
-    // No live connection: remember the setting on the closed session so a later reopen
-    // picks it up. Recording only makes sense while connected, so it's ignored here.
+    // No live connection: remember the setting on the closed session so a later reopen (or, for
+    // "record", the next actual open) picks it up. `record` maps to the `recording` field name.
     const meta = this.closedMeta.get(path);
-    if (meta && checkbox !== 'record') {
-      meta[checkbox] = value;
-      this.persistSessions();
-      this.postState();
+    if (!meta) {
+      return;
     }
+    if (checkbox === 'record') {
+      meta.recording = value;
+    } else {
+      meta[checkbox] = value;
+    }
+    this.persistSessions();
+    this.postState();
   }
 
   private async sendTemplate(id: string, path?: string): Promise<void> {
@@ -559,13 +627,15 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     }
   }
 
-  /** Tears down the terminal for any session whose connection is no longer open, whether it was
-   * closed via the panel or the device was physically unplugged. */
-  private pruneClosedTerminals(): void {
+  /** Detaches the terminal for any session whose connection is no longer open — a defensive
+   * backstop; `PortConnection`'s own `onDidClose` already triggers the same terminal's internal
+   * detach directly (see `pseudoterminal.ts`), so this mainly guards against any path that closed
+   * without going through that subscription. Never disposes — the terminal itself survives for as
+   * long as the session exists in the panel; see `removeSession` for the only path that disposes it. */
+  private syncTerminalConnections(): void {
     for (const [path, terminal] of this.terminals) {
       if (!this.connections.isOpen(path)) {
-        terminal.dispose();
-        this.terminals.delete(path);
+        terminal.detach();
       }
     }
   }
@@ -616,6 +686,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
             rts: connection.rts,
             dtr: connection.dtr,
             logFilePath: connection.logFilePath,
+            logFileUri: connection.logFileUri?.toString(),
             stats: connection.stats,
           };
         }
@@ -626,11 +697,12 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           config: meta?.config ?? defaultConfig,
           hexSend: meta?.hexSend ?? defaultHexSend,
           hexRecv: meta?.hexRecv ?? defaultHexRecv,
-          recording: false,
+          recording: meta?.recording ?? false,
           showTimestamp: meta?.showTimestamp ?? false,
           rts: meta?.rts ?? false,
           dtr: meta?.dtr ?? false,
           logFilePath: meta?.logFilePath,
+          logFileUri: meta?.logFileUri,
           stats: meta?.stats ?? { bytesSent: 0, bytesReceived: 0 },
         };
       }),
