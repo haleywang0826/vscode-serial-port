@@ -16,6 +16,39 @@ const DEFAULT_SAVE_LOG_AT = `${WORKSPACE_FOLDER_TOKEN}/serial_logs`;
 const SESSION_ORDER_KEY = 'serialPort.sessionOrder';
 const CLOSED_META_KEY = 'serialPort.closedMeta';
 
+/** Common USB-to-serial bridge chips, keyed by USB vendor ID (uppercase hex, no "0x" prefix — the
+ * same format `serialport`'s native binding reports, parsed straight out of a `VID_xxxx` substring
+ * of the device's PnP ID). `serialport`'s public `PortInfo` never exposes the OS-level "friendly
+ * name" (e.g. "Silicon Labs CP210x USB to UART Bridge (COM8)") — the Windows binding reads it from
+ * the registry but never assigns it to the result it returns to JS — so this table is what lets the
+ * picker show a recognizable chip name instead of just the bare manufacturer string, which alone
+ * isn't enough to tell apart e.g. two different CP210x-based boards from the same vendor. */
+const CHIP_NAME_BY_VENDOR_ID: Record<string, string> = {
+  '10C4': 'Silicon Labs CP210x',
+  '0403': 'FTDI FT232/FT2232',
+  '1A86': 'WCH CH340/CH341',
+  '067B': 'Prolific PL2303',
+  '2341': 'Arduino',
+  '303A': 'Espressif USB-JTAG/Serial',
+  '1A40': 'Terminus Hub',
+  '0483': 'STMicroelectronics STLink',
+};
+
+/** Builds a port's picker description: a recognized chip name (from `vendorId` via
+ * `CHIP_NAME_BY_VENDOR_ID`) when available — since a bare `manufacturer` string like "Silicon
+ * Labs" doesn't distinguish between that vendor's different chip families — falling back through
+ * `manufacturer`, then `pnpId`, then `serialNumber` (useful for telling apart two otherwise-
+ * identical boards), then an empty string. */
+function buildPortDescription(port: {
+  manufacturer?: string;
+  pnpId?: string;
+  serialNumber?: string;
+  vendorId?: string;
+}): string {
+  const chipName = port.vendorId ? CHIP_NAME_BY_VENDOR_ID[port.vendorId.toUpperCase()] : undefined;
+  return chipName ?? port.manufacturer ?? port.pnpId ?? port.serialNumber ?? '';
+}
+
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
 type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp' | 'rts' | 'dtr';
 type DefaultCheckbox = 'hexSend' | 'hexRecv' | 'showTimestamp' | 'compactTimestamps';
@@ -376,7 +409,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
 
   private async refreshPorts(): Promise<void> {
     const list = await SerialPort.list();
-    this.ports = list.map((port) => ({ path: port.path, description: port.manufacturer ?? port.pnpId ?? '' }));
+    this.ports = list.map((port) => ({ path: port.path, description: buildPortDescription(port) }));
     if (!this.ports.some((port) => port.path === this.selectedPort)) {
       this.selectedPort = this.ports[0]?.path;
     }

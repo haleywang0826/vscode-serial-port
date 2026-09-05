@@ -128,34 +128,30 @@ export function formatBytesForTerminal(data: Uint8Array, hex: boolean): string {
  * always exactly the same length regardless of mode, keeping columns aligned line-to-line. */
 const MODE_WIDTH = 5;
 
-const MONTH_ABBREVIATIONS = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-];
-
-/** Compact display form of a timestamp for the "Compact Timestamps" setting: month-abbrev, day,
+/** Compact display form of a timestamp for the "Compact Timestamps" setting: numeric month/day,
  * time, and milliseconds — no year or UTC offset (per spec, since both are rarely useful for a
- * live session log), e.g. "Aug 31 14:23:01.123". Takes a `Date` (already re-parsed from the stored
+ * live session log), e.g. "08/31 14:23:01.123". Takes a `Date` (already re-parsed from the stored
  * full `toLocalIsoString` string by the caller) rather than reading the clock itself, so this stays
  * a pure, deterministic display transform. */
 export function toLocalCompactString(date: Date): string {
   const pad = (value: number, width = 2) => String(value).padStart(width, '0');
   return (
-    `${MONTH_ABBREVIATIONS[date.getMonth()]} ${pad(date.getDate())} ` +
+    `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ` +
     `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`
   );
 }
 
-/** Builds the shared `[timestamp] DIRECTION MODE` header used by both the terminal (when "Show
+/** Builds the shared `[timestamp MODE DIRECTION]` header used by both the terminal (when "Show
  * timestamp" is on) and the file log (always) — same fixed length on every line since `timestamp`
- * is already zero-padded/fixed-offset (see `toLocalIsoString`), `direction` is always 2 characters,
- * and `mode` is padded to `MODE_WIDTH`. `compact`, when true, re-parses the stored `timestamp`
+ * is already zero-padded/fixed-offset (see `toLocalIsoString`), `mode` is padded to `MODE_WIDTH`,
+ * and `direction` is always 2 characters. `compact`, when true, re-parses the stored `timestamp`
  * string (always the full `toLocalIsoString` form — the source of truth, never mutated by this
  * setting) via `toLocalCompactString` for display — a pure, live, display-time transform, so
  * flipping the "Compact Timestamps" setting never retroactively changes an already-rendered or
  * already-logged line. */
 export function formatTrafficHeader(timestamp: string, direction: 'TX' | 'RX', hex: boolean, compact: boolean): string {
   const displayTimestamp = compact ? toLocalCompactString(new Date(timestamp)) : timestamp;
-  return `[${displayTimestamp}] ${direction} ${(hex ? 'HEX' : 'ASCII').padEnd(MODE_WIDTH)}`;
+  return `[${displayTimestamp} ${(hex ? 'HEX' : 'ASCII').padEnd(MODE_WIDTH)} ${direction}]`;
 }
 
 /**
