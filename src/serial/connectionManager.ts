@@ -120,6 +120,11 @@ export class PortConnection {
   /** Raw bytes accumulated since the last RX flush — see `handleIncoming`/`flushRxBuffer`. */
   private rxBuffer: Uint8Array = new Uint8Array(0);
   private rxFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Timestamp `flushRxBuffer` last left a nonzero `rxBuffer` behind as an unfinished UTF-8
+   * sequence (see `splitTrailingIncompleteUtf8`), or `undefined` when `rxBuffer` is empty. Used
+   * by `handleIncoming` to tell a genuinely-still-arriving continuation byte (the case this
+   * holdback exists for) from stale leftovers of an already-finished message — see there. */
+  private rxPendingSince: number | undefined;
 
   private readonly onDidTrafficEmitter = new vscode.EventEmitter<TrafficEvent>();
   /** Fires for every TX (typed or template-sent) and RX event, so any live view always sees
@@ -368,11 +373,29 @@ export class PortConnection {
    * two reads — see `splitTrailingIncompleteUtf8`) render as one coherent line instead of several
    * garbled fragments. Byte counters and `onDidUpdate` still fire immediately on raw arrival (each
    * new chunk resets the debounce timer), so the stats display stays live even while a message is
-   * still being assembled. */
+   * still being assembled.
+   *
+   * `flushRxBuffer` only ever runs (non-force) once `messageGapMs` has already passed with nothing
+   * new arriving — so if it leaves a trailing incomplete UTF-8 sequence in `rxBuffer`
+   * (`rxPendingSince` gets set), a genuine continuation byte for that same character would already
+   * have had to arrive within that same window to avoid ever reaching a quiet flush in the first
+   * place. If a completely new chunk shows up only *after* that window has elapsed again, it isn't
+   * completing that old sequence — it's an unrelated later message, and blindly concatenating it
+   * would silently corrupt that message's leading byte(s) with the stale leftover (previously
+   * observed as a stray extra byte/replacement-character prepended to an otherwise-correct RX
+   * line on every repeat of an unrelated later send). So any such stale leftover is flushed out on
+   * its own, as a forced (no-holdback) event, before the new chunk is appended. */
   private handleIncoming(chunk: Buffer): void {
     const bytes = new Uint8Array(chunk);
     this.stats.bytesReceived += bytes.length;
     this.onDidUpdateEmitter.fire();
+    if (
+      this.rxBuffer.length > 0 &&
+      this.rxPendingSince !== undefined &&
+      Date.now() - this.rxPendingSince >= this.formatSettings.messageGapMs
+    ) {
+      this.flushRxBuffer(true);
+    }
     this.rxBuffer = concatBytes(this.rxBuffer, bytes);
     if (this.rxFlushTimer) {
       clearTimeout(this.rxFlushTimer);
@@ -401,6 +424,7 @@ export class PortConnection {
         ? { complete: this.rxBuffer, pending: new Uint8Array(0) }
         : splitTrailingIncompleteUtf8(this.rxBuffer);
     this.rxBuffer = pending;
+    this.rxPendingSince = pending.length > 0 ? Date.now() : undefined;
     if (complete.length === 0) {
       return;
     }
