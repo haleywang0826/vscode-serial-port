@@ -179,8 +179,10 @@ export function createSerialTerminal(
   let updateSub: vscode.Disposable | undefined;
   let connectionCloseSub: vscode.Disposable | undefined;
 
+  const scrollRegionSequence = (): string => `\x1b[1;${rows - 1}r`;
+
   const setScrollRegion = (): void => {
-    writeEmitter.fire(`\x1b[1;${rows - 1}r`);
+    writeEmitter.fire(scrollRegionSequence());
   };
 
   /** Redraws the pinned input row: prompt + the input line clipped to a horizontally-scrolling
@@ -205,7 +207,9 @@ export function createSerialTerminal(
     const clipped = displayLine.slice(offset, offset + available);
     const cursorCol = prompt.length + (displayCursorPos - offset) + 1;
     const cursorStyle = insertMode ? CURSOR_STYLE_INSERT : CURSOR_STYLE_OVERWRITE;
-    writeEmitter.fire(`\x1b[${rows};1H\x1b[2K${prompt}${clipped}\x1b[${rows};${cursorCol}H${cursorStyle}`);
+    // Re-assert scroll region on every write (xterm.js resets it on buffer resize, including
+    // the internal resize VS Code does right after pty.open(), so we need to restore it each time)
+    writeEmitter.fire(`${scrollRegionSequence()}\x1b[${rows};1H\x1b[2K${prompt}${clipped}\x1b[${rows};${cursorCol}H${cursorStyle}`);
   };
 
   /** Writes text (must end `\r\n`) into the scroll region, then restores the pinned input line. */
