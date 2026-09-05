@@ -117,14 +117,12 @@ export class PortConnection {
    * prior open's. */
   private historyText = '';
 
-  /** Raw bytes accumulated since the last RX flush — see `handleIncoming`/`flushRxBuffer`. */
+  /** Raw bytes accumulated since the last RX flush — see `handleIncoming`/`flushRxBuffer`. Also
+   * reused to hold a trailing incomplete-looking UTF-8 sequence awaiting either a genuine
+   * continuation byte (new data arrives) or its own self-expiry flush (`rxFlushTimer` fires with
+   * nothing new having arrived) — see `flushRxBuffer`. */
   private rxBuffer: Uint8Array = new Uint8Array(0);
   private rxFlushTimer: ReturnType<typeof setTimeout> | undefined;
-  /** Timestamp `flushRxBuffer` last left a nonzero `rxBuffer` behind as an unfinished UTF-8
-   * sequence (see `splitTrailingIncompleteUtf8`), or `undefined` when `rxBuffer` is empty. Used
-   * by `handleIncoming` to tell a genuinely-still-arriving continuation byte (the case this
-   * holdback exists for) from stale leftovers of an already-finished message — see there. */
-  private rxPendingSince: number | undefined;
 
   private readonly onDidTrafficEmitter = new vscode.EventEmitter<TrafficEvent>();
   /** Fires for every TX (typed or template-sent) and RX event, so any live view always sees
@@ -375,31 +373,20 @@ export class PortConnection {
    * new chunk resets the debounce timer), so the stats display stays live even while a message is
    * still being assembled.
    *
-   * `flushRxBuffer` only ever runs (non-force) once `messageGapMs` has already passed with nothing
-   * new arriving — so if it leaves a trailing incomplete UTF-8 sequence in `rxBuffer`
-   * (`rxPendingSince` gets set), a genuine continuation byte for that same character would already
-   * have had to arrive within that same window to avoid ever reaching a quiet flush in the first
-   * place. If a completely new chunk shows up only *after* that window has elapsed again, it isn't
-   * completing that old sequence — it's an unrelated later message, and blindly concatenating it
-   * would silently corrupt that message's leading byte(s) with the stale leftover (previously
-   * observed as a stray extra byte/replacement-character prepended to an otherwise-correct RX
-   * line on every repeat of an unrelated later send). So any such stale leftover is flushed out on
-   * its own, as a forced (no-holdback) event, before the new chunk is appended. */
+   * A trailing incomplete-looking UTF-8 sequence left behind by a flush gets exactly one more
+   * `messageGapMs` window to receive its continuation byte — either genuinely (new data arrives
+   * here, cancelling and rescheduling `rxFlushTimer` below) or via its own self-expiry forced
+   * flush scheduled by `flushRxBuffer` itself. Either way, `rxBuffer` is guaranteed empty again
+   * well before any later, unrelated message's traffic can arrive, so concatenating fresh bytes
+   * onto it here is always safe. */
   private handleIncoming(chunk: Buffer): void {
     const bytes = new Uint8Array(chunk);
     this.stats.bytesReceived += bytes.length;
     this.onDidUpdateEmitter.fire();
-    if (
-      this.rxBuffer.length > 0 &&
-      this.rxPendingSince !== undefined &&
-      Date.now() - this.rxPendingSince >= this.formatSettings.messageGapMs
-    ) {
-      this.flushRxBuffer(true);
-    }
-    this.rxBuffer = concatBytes(this.rxBuffer, bytes);
     if (this.rxFlushTimer) {
       clearTimeout(this.rxFlushTimer);
     }
+    this.rxBuffer = concatBytes(this.rxBuffer, bytes);
     this.rxFlushTimer = setTimeout(() => {
       this.rxFlushTimer = undefined;
       this.flushRxBuffer();
@@ -408,13 +395,14 @@ export class PortConnection {
 
   /** Turns the accumulated `rxBuffer` into one `TrafficEvent`. Normally holds back a trailing
    * incomplete UTF-8 sequence (see `splitTrailingIncompleteUtf8`) until it's complete; `force`
-   * (used on dispose/port-close) flushes everything immediately instead, so buffered trailing
-   * bytes are never silently dropped when the connection is going away. The UTF-8 holdback is
-   * skipped entirely in hex-receive mode — hex has no multi-byte-character concept (see
-   * `format.ts`), so applying it there only ever misidentifies an ordinary trailing byte as an
-   * incomplete lead byte and holds it back into the next flush, which is what previously made a
-   * hex receive look like it shed a byte onto the following message (e.g. "00 11" then "20 00 11"
-   * instead of "00 11 20" in one piece). */
+   * (used on dispose/port-close, and by this method's own self-expiry timer below) flushes
+   * everything immediately instead, so buffered trailing bytes are never silently dropped when
+   * the connection is going away, and a genuinely-incomplete-forever sequence doesn't sit in
+   * `rxBuffer` indefinitely. The UTF-8 holdback is skipped entirely in hex-receive mode — hex has
+   * no multi-byte-character concept (see `format.ts`), so applying it there only ever
+   * misidentifies an ordinary trailing byte as an incomplete lead byte and holds it back into the
+   * next flush, which is what previously made a hex receive look like it shed a byte onto the
+   * following message (e.g. "00 11" then "20 00 11" instead of "00 11 20" in one piece). */
   private flushRxBuffer(force = false): void {
     if (this.rxBuffer.length === 0) {
       return;
@@ -424,7 +412,18 @@ export class PortConnection {
         ? { complete: this.rxBuffer, pending: new Uint8Array(0) }
         : splitTrailingIncompleteUtf8(this.rxBuffer);
     this.rxBuffer = pending;
-    this.rxPendingSince = pending.length > 0 ? Date.now() : undefined;
+    if (pending.length > 0) {
+      /* Give the pending tail one more messageGapMs to complete; if `handleIncoming` doesn't
+       * cancel this first (genuine continuation arrived), it wasn't actually incomplete — it's a
+       * lone invalid trailing byte with nothing more coming — so flush it out on its own instead
+       * of leaving it to be silently glued onto whatever unrelated message's traffic arrives next
+       * (previously observed as an orphaned replacement-character RX line appearing whenever the
+       * *next* send happened to occur, arbitrarily later). */
+      this.rxFlushTimer = setTimeout(() => {
+        this.rxFlushTimer = undefined;
+        this.flushRxBuffer(true);
+      }, this.formatSettings.messageGapMs);
+    }
     if (complete.length === 0) {
       return;
     }
