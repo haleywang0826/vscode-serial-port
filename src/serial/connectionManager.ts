@@ -524,6 +524,10 @@ export class PortConnection {
     }
     this.finishStreams();
     this.flushLogPartials();
+    // Write stop banner before closing log if recording is active
+    if (this.recording) {
+      this.writeSessionBanner('recording stopped');
+    }
     this.flushLogFile();
     if (this.logFlushTimer) {
       clearTimeout(this.logFlushTimer);
