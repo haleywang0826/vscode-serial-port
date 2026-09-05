@@ -108,7 +108,7 @@
       <div class="config-grid">
         <label>Baud Rate</label>
         <div class="row">
-          <select data-action="setting" data-prefix="${prefix}" data-field="baudRate" ${baudLockedAttrs}>
+          <select id="cfg-baudRate-${escapeHtml(prefix)}" data-action="setting" data-prefix="${prefix}" data-field="baudRate" ${baudLockedAttrs}>
             ${BAUD_RATE_PRESETS.map(
               (rate) =>
                 `<option value="${rate}" ${config.baudRate === rate && !showCustomBaud ? 'selected' : ''}>${rate}</option>`,
@@ -117,7 +117,7 @@
           </select>
           ${
             showCustomBaud
-              ? `<input type="number" min="1" data-action="setting-custom-baud" data-prefix="${prefix}" value="${config.baudRate}" ${baudLockedAttrs}>`
+              ? `<input id="cfg-customBaud-${escapeHtml(prefix)}" type="number" min="1" data-action="setting-custom-baud" data-prefix="${prefix}" value="${config.baudRate}" ${baudLockedAttrs}>`
               : ''
           }
         </div>
@@ -132,20 +132,20 @@
           : `
       <div class="config-grid">
         <label>Data Bits</label>
-        <select data-action="setting" data-prefix="${prefix}" data-field="dataBits" ${lockedAttrs}>
+        <select id="cfg-dataBits-${escapeHtml(prefix)}" data-action="setting" data-prefix="${prefix}" data-field="dataBits" ${lockedAttrs}>
           ${DATA_BITS_OPTIONS.map(
             (bits) => `<option value="${bits}" ${config.dataBits === bits ? 'selected' : ''}>${bits}</option>`,
           ).join('')}
         </select>
         <label>Parity</label>
-        <select data-action="setting" data-prefix="${prefix}" data-field="parity" ${lockedAttrs}>
+        <select id="cfg-parity-${escapeHtml(prefix)}" data-action="setting" data-prefix="${prefix}" data-field="parity" ${lockedAttrs}>
           ${PARITY_OPTIONS.map(
             (parity) =>
               `<option value="${parity}" ${config.parity === parity ? 'selected' : ''}>${capitalize(parity)}</option>`,
           ).join('')}
         </select>
         <label>Stop Bits</label>
-        <select data-action="setting" data-prefix="${prefix}" data-field="stopBits" ${lockedAttrs}>
+        <select id="cfg-stopBits-${escapeHtml(prefix)}" data-action="setting" data-prefix="${prefix}" data-field="stopBits" ${lockedAttrs}>
           ${STOP_BITS_OPTIONS.map(
             (bits) => `<option value="${bits}" ${config.stopBits === bits ? 'selected' : ''}>${bits}</option>`,
           ).join('')}
@@ -274,14 +274,15 @@
     const submitAction = kind === 'add' ? 'add-template-submit' : 'edit-template-submit';
     const cancelAction = kind === 'add' ? 'add-template-cancel' : 'edit-template-cancel';
     const idAttr = id ? `data-id="${escapeHtml(id)}"` : '';
+    const draftKey = kind === 'add' ? 'add' : id;
     return `
-      <div class="template-form" data-draft="${kind === 'add' ? 'add' : escapeHtml(id)}">
-        <input name="name" placeholder="Name" value="${escapeHtml(draft.name)}">
-        <select name="format">
+      <div class="template-form" data-draft="${escapeHtml(draftKey)}">
+        <input id="tpl-name-${escapeHtml(draftKey)}" name="name" placeholder="Name" value="${escapeHtml(draft.name)}">
+        <select id="tpl-format-${escapeHtml(draftKey)}" name="format">
           <option value="hex" ${draft.format === 'hex' ? 'selected' : ''}>Hex</option>
           <option value="ascii" ${draft.format === 'ascii' ? 'selected' : ''}>ASCII</option>
         </select>
-        <textarea name="data" placeholder="Payload" rows="2">${escapeHtml(draft.data)}</textarea>
+        <textarea id="tpl-data-${escapeHtml(draftKey)}" name="data" placeholder="Payload" rows="2">${escapeHtml(draft.data)}</textarea>
         <div class="row">
           <button data-action="${submitAction}" ${idAttr}>Save</button>
           <button data-action="${cancelAction}">Cancel</button>
@@ -388,13 +389,13 @@
                 </div>
                 <div class="row">
                   <label>Message Gap (ms)</label>
-                  <input type="number" min="0" data-action="message-gap-ms" value="${lastState.messageGapMs}">
+                  <input id="message-gap-ms" type="number" min="0" data-action="message-gap-ms" value="${lastState.messageGapMs}">
                 </div>
                 <div class="row">
                   <label>TX Color</label>
-                  <input type="color" data-action="terminal-color" data-which="tx" value="${lastState.txColor}">
+                  <input id="terminal-color-tx" type="color" data-action="terminal-color" data-which="tx" value="${lastState.txColor}">
                   <label>RX Color</label>
-                  <input type="color" data-action="terminal-color" data-which="rx" value="${lastState.rxColor}">
+                  <input id="terminal-color-rx" type="color" data-action="terminal-color" data-which="rx" value="${lastState.rxColor}">
                 </div>
               </div>`
         }
