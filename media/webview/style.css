@@ -142,8 +142,28 @@ h3 {
   font-size: 11px;
 }
 
+/* Closes the expanded Advanced block. Without it the last advanced control butts straight into
+   whatever follows and the group has a visible start but no visible end; only rendered while the
+   twisty is open, so a collapsed card shows no stray line. */
+.advanced-end {
+  border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+  margin: 8px 0 2px;
+  opacity: 0.6;
+}
+
 .config-grid label {
   color: var(--vscode-descriptionForeground);
+}
+
+/* An item that wants the whole grid width rather than the label/control split — the Device Console
+   checkbox, whose text is a sentence, not a field name. */
+.config-grid .grid-span {
+  grid-column: 1 / -1;
+}
+
+/* The grid supplies the vertical rhythm, so a .row nested in a cell must not add its own. */
+.config-grid .row {
+  margin-bottom: 0;
 }
 
 select,

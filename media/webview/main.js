@@ -7,6 +7,37 @@
   const DATA_BITS_OPTIONS = [5, 6, 7, 8];
   const PARITY_OPTIONS = ['none', 'even', 'odd', 'mark', 'space'];
   const STOP_BITS_OPTIONS = [1, 1.5, 2];
+  /** Value must match the host's `LineEnding` union; label is what a serial-terminal user expects
+   * to see (the same wording the Arduino IDE's line-ending picker uses). */
+  const LINE_ENDING_OPTIONS = [
+    { value: 'none', label: 'None' },
+    { value: 'lf', label: 'NL (\\n)' },
+    { value: 'cr', label: 'CR (\\r)' },
+    { value: 'crlf', label: 'CRLF (\\r\\n)' },
+  ];
+  /** Order must match SEVERITY_ORDER in src/severityColors.ts — most severe first, so the block
+   * reads as a legend. */
+  const SEVERITY_LEVELS = ['ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'];
+  /** Only used to position the colour picker for a level whose override is off: `<input
+   * type="color">` has no "unset" value, so it has to show *something*. The real defaults live in
+   * package.json; these never reach the host unless the user actually picks a colour. */
+  const SEVERITY_PICKER_FALLBACK = {
+    ERROR: '#f14c4c',
+    WARN: '#cca700',
+    INFO: '#6f9dc0',
+    DEBUG: '#9d9d9d',
+    TRACE: '#6e6e6e',
+  };
+  /** Rendered into an HTML `title=`, where newlines survive as line breaks in the native tooltip. */
+  const DEVICE_CONSOLE_HINT = [
+    'Device Console — hand the terminal over to the device.',
+    'Every keystroke (Ctrl+C, Ctrl+D, Tab, arrow keys) is sent the instant you press it,',
+    'and the device controls the screen itself.',
+    'Use it for a MicroPython REPL, a Zephyr or ESP-IDF shell, a bootloader menu,',
+    'or any full-screen device UI.',
+    'Off: the terminal edits a line locally (history, cursor keys, Ctrl+L) and sends on Enter.',
+    'Record to File keeps working either way.',
+  ].join('\n');
 
   let lastState = {
     ports: [],
@@ -17,8 +48,13 @@
     defaultShowTimestamp: false,
     compactTimestamps: true,
     messageGapMs: 20,
+    logFormat: 'annotated',
+    detectSeverity: true,
+    defaultLineEnding: 'crlf',
+    defaultDeviceConsole: false,
     txColor: '#00cccc',
     rxColor: '#33cc33',
+    severityColors: { ...SEVERITY_PICKER_FALLBACK },
     saveLogAt: '${workspaceFolder}/serial_logs',
     saveLogAtIsCustom: false,
     sessions: [],
@@ -37,6 +73,7 @@
     portCollapsed: false,
     sessionsCollapsed: false,
     defaultSettingsCollapsed: true,
+    levelColorsCollapsed: true,
     collapsedSessions: new Set(),
     templatesCollapsed: true,
     templateTargetPath: undefined,
@@ -99,7 +136,13 @@
     return formatted.length;
   }
 
-  function renderConfigControls(prefix, config, locked, lockBaud) {
+  /**
+   * Baud rate, then an **Advanced** twisty holding the frame settings plus whatever `advancedExtra`
+   * HTML the caller adds (Line Ending, Device Console, Message Gap — the settings that are worth
+   * having but not worth the space they took at the top of every card). `ui.advancedCollapsed` is
+   * keyed by `prefix`, so the session card and Default Settings expand independently.
+   */
+  function renderConfigControls(prefix, config, locked, lockBaud, advancedExtra = '') {
     const showCustomBaud = ui.customBaud[prefix] || !BAUD_RATE_PRESETS.includes(config.baudRate);
     const lockedAttrs = locked ? 'disabled title="Reopen the port to change this"' : '';
     const baudLockedAttrs = lockBaud ? 'disabled title="Reopen the port to change this"' : '';
@@ -108,7 +151,7 @@
       <div class="config-grid">
         <label>Baud Rate</label>
         <div class="row">
-          <select id="cfg-baudRate-${escapeHtml(prefix)}" data-action="setting" data-prefix="${prefix}" data-field="baudRate" ${baudLockedAttrs}>
+          <select data-action="setting" data-prefix="${prefix}" data-field="baudRate" ${baudLockedAttrs}>
             ${BAUD_RATE_PRESETS.map(
               (rate) =>
                 `<option value="${rate}" ${config.baudRate === rate && !showCustomBaud ? 'selected' : ''}>${rate}</option>`,
@@ -117,7 +160,7 @@
           </select>
           ${
             showCustomBaud
-              ? `<input id="cfg-customBaud-${escapeHtml(prefix)}" type="number" min="1" data-action="setting-custom-baud" data-prefix="${prefix}" value="${config.baudRate}" ${baudLockedAttrs}>`
+              ? `<input type="number" min="1" data-action="setting-custom-baud" data-prefix="${prefix}" value="${config.baudRate}" ${baudLockedAttrs}>`
               : ''
           }
         </div>
@@ -132,26 +175,54 @@
           : `
       <div class="config-grid">
         <label>Data Bits</label>
-        <select id="cfg-dataBits-${escapeHtml(prefix)}" data-action="setting" data-prefix="${prefix}" data-field="dataBits" ${lockedAttrs}>
+        <select data-action="setting" data-prefix="${prefix}" data-field="dataBits" ${lockedAttrs}>
           ${DATA_BITS_OPTIONS.map(
             (bits) => `<option value="${bits}" ${config.dataBits === bits ? 'selected' : ''}>${bits}</option>`,
           ).join('')}
         </select>
         <label>Parity</label>
-        <select id="cfg-parity-${escapeHtml(prefix)}" data-action="setting" data-prefix="${prefix}" data-field="parity" ${lockedAttrs}>
+        <select data-action="setting" data-prefix="${prefix}" data-field="parity" ${lockedAttrs}>
           ${PARITY_OPTIONS.map(
             (parity) =>
               `<option value="${parity}" ${config.parity === parity ? 'selected' : ''}>${capitalize(parity)}</option>`,
           ).join('')}
         </select>
         <label>Stop Bits</label>
-        <select id="cfg-stopBits-${escapeHtml(prefix)}" data-action="setting" data-prefix="${prefix}" data-field="stopBits" ${lockedAttrs}>
+        <select data-action="setting" data-prefix="${prefix}" data-field="stopBits" ${lockedAttrs}>
           ${STOP_BITS_OPTIONS.map(
             (bits) => `<option value="${bits}" ${config.stopBits === bits ? 'selected' : ''}>${bits}</option>`,
           ).join('')}
         </select>
-      </div>`
+        ${advancedExtra}
+      </div>
+      <div class="advanced-end"></div>`
       }`;
+  }
+
+  /** Line Ending picker, shared by both cards; `path` is undefined on the defaults side. */
+  function renderLineEndingRow(value, path) {
+    const attrs = path
+      ? `data-action="session-line-ending" data-path="${escapeHtml(path)}"`
+      : 'data-action="default-line-ending"';
+    return `
+      <label>Line Ending</label>
+      <select ${attrs}>
+        ${LINE_ENDING_OPTIONS.map(
+          (option) => `<option value="${option.value}" ${value === option.value ? 'selected' : ''}>${option.label}</option>`,
+        ).join('')}
+      </select>`;
+  }
+
+  /** Device Console checkbox, spanning both grid columns so the hint text isn't squeezed into the
+   * label column. `path` is undefined on the defaults side. */
+  function renderDeviceConsoleRow(checked, path) {
+    const attrs = path
+      ? `data-action="checkbox" data-path="${escapeHtml(path)}" data-checkbox="deviceConsole"`
+      : 'data-action="default-checkbox" data-checkbox="deviceConsole"';
+    return `
+      <label class="grid-span" title="${escapeHtml(DEVICE_CONSOLE_HINT)}">
+        <input type="checkbox" ${attrs} ${checked ? 'checked' : ''}> Device Console
+      </label>`;
   }
 
   function renderLogFolderRow() {
@@ -206,7 +277,14 @@
       ? ''
       : `
         <div class="session-body">
-          ${renderConfigControls(prefix, session.config, session.connected, false)}
+          ${renderConfigControls(
+            prefix,
+            session.config,
+            session.connected,
+            false,
+            renderLineEndingRow(session.lineEnding, session.path) +
+              renderDeviceConsoleRow(session.deviceConsole, session.path),
+          )}
           <div class="row checkboxes">
             <div class="checkbox-grid">
               <div class="checkbox-line">
@@ -274,15 +352,14 @@
     const submitAction = kind === 'add' ? 'add-template-submit' : 'edit-template-submit';
     const cancelAction = kind === 'add' ? 'add-template-cancel' : 'edit-template-cancel';
     const idAttr = id ? `data-id="${escapeHtml(id)}"` : '';
-    const draftKey = kind === 'add' ? 'add' : id;
     return `
-      <div class="template-form" data-draft="${escapeHtml(draftKey)}">
-        <input id="tpl-name-${escapeHtml(draftKey)}" name="name" placeholder="Name" value="${escapeHtml(draft.name)}">
-        <select id="tpl-format-${escapeHtml(draftKey)}" name="format">
+      <div class="template-form" data-draft="${kind === 'add' ? 'add' : escapeHtml(id)}">
+        <input name="name" placeholder="Name" value="${escapeHtml(draft.name)}">
+        <select name="format">
           <option value="hex" ${draft.format === 'hex' ? 'selected' : ''}>Hex</option>
           <option value="ascii" ${draft.format === 'ascii' ? 'selected' : ''}>ASCII</option>
         </select>
-        <textarea id="tpl-data-${escapeHtml(draftKey)}" name="data" placeholder="Payload" rows="2">${escapeHtml(draft.data)}</textarea>
+        <textarea name="data" placeholder="Payload" rows="2">${escapeHtml(draft.data)}</textarea>
         <div class="row">
           <button data-action="${submitAction}" ${idAttr}>Save</button>
           <button data-action="${cancelAction}">Cancel</button>
@@ -356,6 +433,50 @@
       </section>`;
   }
 
+  /**
+   * One palette, two surfaces: each colour drives the terminal row for a detected level *and* the
+   * level token in any open recorded log. Every label is drawn in its own colour, so the block
+   * doubles as a legend for what the terminal is showing.
+   */
+  function renderLevelColors() {
+    const colors = lastState.severityColors ?? {};
+    const rows = SEVERITY_LEVELS.map((level) => {
+      const value = colors[level] ?? '';
+      // `<input type="color">` has no "unset" state, so an off level shows the shipped colour as a
+      // starting point and says "off" in the label instead.
+      const swatch = value || SEVERITY_PICKER_FALLBACK[level];
+      const label = value
+        ? `<label style="color: ${escapeHtml(value)}">${level}</label>`
+        : `<label class="muted">${level} <span class="badge">off</span></label>`;
+      return `
+        ${label}
+        <div class="row">
+          <input type="color" data-action="severity-color" data-severity="${level}" value="${escapeHtml(swatch)}">
+          ${
+            value
+              ? `<button class="icon-button" data-action="clear-severity-color" data-severity="${level}" title="Turn this level's colour off — the terminal falls back to the TX/RX colour and the editor to the theme"><i class="codicon codicon-discard"></i></button>`
+              : ''
+          }
+        </div>`;
+    }).join('');
+    return `
+      <div class="section-header collapsible-header advanced-toggle" data-action="toggle-level-colors">
+        <span class="twisty ${ui.levelColorsCollapsed ? '' : 'expanded'}"></span>
+        <span class="muted">Level Colours</span>
+      </div>
+      ${
+        ui.levelColorsCollapsed
+          ? ''
+          : `
+      <div class="config-grid">${rows}</div>
+      <div class="row">
+        <button data-action="reset-severity-colors">Reset all</button>
+        <button class="icon-button" data-action="open-extension-settings" title="Open these in VS Code Settings"><i class="codicon codicon-gear"></i></button>
+        <span class="muted">Applies to the terminal and to open logs.</span>
+      </div>`
+      }`;
+  }
+
   function render() {
     const active = document.activeElement;
     const focusInfo =
@@ -378,7 +499,16 @@
             : `
               <div class="section-body">
                 ${renderLogFolderRow()}
-                ${renderConfigControls('default', lastState.defaultConfig, false, false)}
+                ${renderConfigControls(
+                  'default',
+                  lastState.defaultConfig,
+                  false,
+                  false,
+                  renderLineEndingRow(lastState.defaultLineEnding) +
+                    `<label>Message Gap (ms)</label>
+                     <input type="number" min="0" data-action="message-gap-ms" value="${lastState.messageGapMs}">` +
+                    renderDeviceConsoleRow(lastState.defaultDeviceConsole),
+                )}
                 <div class="row">
                   <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexSend" ${lastState.defaultHexSend ? 'checked' : ''}> Hex Send</label>
                   <label><input type="checkbox" data-action="default-checkbox" data-checkbox="hexRecv" ${lastState.defaultHexRecv ? 'checked' : ''}> Hex Receive</label>
@@ -388,15 +518,22 @@
                   <label><input type="checkbox" data-action="default-checkbox" data-checkbox="compactTimestamps" ${lastState.compactTimestamps ? 'checked' : ''}> Compact Timestamps</label>
                 </div>
                 <div class="row">
-                  <label>Message Gap (ms)</label>
-                  <input id="message-gap-ms" type="number" min="0" data-action="message-gap-ms" value="${lastState.messageGapMs}">
+                  <label title="Recognise ESP-IDF, Zephyr, printk and [ERROR]-style level prefixes; colour the terminal row and tag the log line to match."><input type="checkbox" data-action="default-checkbox" data-checkbox="detectSeverity" ${lastState.detectSeverity ? 'checked' : ''}> Detect Severity</label>
+                </div>
+                <div class="row">
+                  <label title="Applies to recordings started from here on; a recording already in progress keeps the format it began with.">Log Format</label>
+                  <select data-action="log-format">
+                    <option value="annotated" ${lastState.logFormat === 'annotated' ? 'selected' : ''}>Annotated</option>
+                    <option value="raw" ${lastState.logFormat === 'raw' ? 'selected' : ''}>Raw Capture</option>
+                  </select>
                 </div>
                 <div class="row">
                   <label>TX Color</label>
-                  <input id="terminal-color-tx" type="color" data-action="terminal-color" data-which="tx" value="${lastState.txColor}">
+                  <input type="color" data-action="terminal-color" data-which="tx" value="${lastState.txColor}">
                   <label>RX Color</label>
-                  <input id="terminal-color-rx" type="color" data-action="terminal-color" data-which="rx" value="${lastState.rxColor}">
+                  <input type="color" data-action="terminal-color" data-which="rx" value="${lastState.rxColor}">
                 </div>
+                ${renderLevelColors()}
               </div>`
         }
       </section>
@@ -478,6 +615,18 @@
       postMessage({ type: 'updateDefaultCheckbox', checkbox: el.dataset.checkbox, value: el.checked });
       return;
     }
+    if (el.matches('[data-action="session-line-ending"]')) {
+      postMessage({ type: 'updateSessionLineEnding', path: el.dataset.path, value: el.value });
+      return;
+    }
+    if (el.matches('[data-action="default-line-ending"]')) {
+      postMessage({ type: 'updateDefaultLineEnding', value: el.value });
+      return;
+    }
+    if (el.matches('[data-action="log-format"]')) {
+      postMessage({ type: 'updateLogFormat', value: el.value });
+      return;
+    }
     if (el.matches('[data-action="message-gap-ms"]')) {
       const value = Number(el.value);
       if (!Number.isFinite(value) || value < 0) {
@@ -488,6 +637,10 @@
     }
     if (el.matches('[data-action="terminal-color"]')) {
       postMessage({ type: 'updateTerminalColor', which: el.dataset.which, value: el.value });
+      return;
+    }
+    if (el.matches('[data-action="severity-color"]')) {
+      postMessage({ type: 'updateSeverityColor', severity: el.dataset.severity, value: el.value });
       return;
     }
     if (el.matches('[data-action="template-target-select"]')) {
@@ -559,6 +712,20 @@
       case 'toggle-port-section':
         ui.portCollapsed = !ui.portCollapsed;
         render();
+        break;
+      case 'toggle-level-colors':
+        ui.levelColorsCollapsed = !ui.levelColorsCollapsed;
+        render();
+        break;
+      case 'clear-severity-color':
+        // '' is the host's "no override" sentinel; `<input type="color">` can't express it.
+        postMessage({ type: 'updateSeverityColor', severity: el.dataset.severity, value: '' });
+        break;
+      case 'reset-severity-colors':
+        postMessage({ type: 'resetSeverityColors' });
+        break;
+      case 'open-extension-settings':
+        postMessage({ type: 'openExtensionSettings' });
         break;
       case 'toggle-advanced': {
         const prefix = el.dataset.prefix;

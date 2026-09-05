@@ -4,8 +4,11 @@ out/
 *.vsix
 .vscode-test/
 *.log
+!samples/*.log
 .env
 .env.*
 *.tsbuildinfo
 serial_logs/
+samples/
+test/
 CLAUDE.md

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Serial Log Injection",
+  "scopeName": "text.log.serial.injection",
+  "comment": "Gives plain *.log files (older recordings, or a custom saveLogAt naming that does not end in .serial.log) the same serial-specific colouring, layered on top of VS Code's built-in 'log' grammar rather than replacing it — the language indicator still reads 'Log'. Every rule it pulls in is anchored to the exact '[<timestamp> <MODE> <DIRECTION>]' header this extension writes, so an unrelated .log file a user happens to open is left entirely alone.",
+  "injectionSelector": "L:text.log",
+  "patterns": [
+    { "include": "text.log.serial#session-banner" },
+    { "include": "text.log.serial#hex-line" },
+    { "include": "text.log.serial#ascii-line" }
+  ]
+}

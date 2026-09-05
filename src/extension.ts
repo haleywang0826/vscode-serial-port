@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { SeverityDecorator } from './editor/severityDecorator';
 import { ConnectionManager } from './serial/connectionManager';
 import { SerialTerminal } from './serial/pseudoterminal';
 import { TemplateStore } from './templates/templateStore';
@@ -23,6 +24,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     panelProvider,
     connections,
+    // Colours the level token in any open recorded log from serialPort.severityColors. Independent
+    // of whether a port is open — the whole point is reading a log after the fact.
+    new SeverityDecorator(),
     { dispose: () => terminals.forEach((terminal) => terminal.dispose()) },
   );
 }

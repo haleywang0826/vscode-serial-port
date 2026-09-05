@@ -40,7 +40,8 @@
     }
   },
   "activationEvents": [
-    "onView:serialPortExplorer"
+    "onView:serialPortExplorer",
+    "onLanguage:serial-log"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -118,16 +119,56 @@
           "default": false,
           "description": "Default Show Timestamp state used when a newly added port is opened."
         },
+        "serialPort.defaultLineEnding": {
+          "type": "string",
+          "enum": [
+            "none",
+            "lf",
+            "cr",
+            "crlf"
+          ],
+          "enumDescriptions": [
+            "Send exactly what was typed, with no terminator appended.",
+            "Append a line feed (\\n).",
+            "Append a carriage return (\\r).",
+            "Append a carriage return and line feed (\\r\\n)."
+          ],
+          "default": "crlf",
+          "description": "Line terminator appended to every ASCII send (typed lines and ASCII templates; never hex sends), used when a newly added port is opened. Most embedded consoles — ESP-IDF, Zephyr shell, AT-command modems — do nothing until a command line is terminated. Each session can override this from its card."
+        },
+        "serialPort.defaultDeviceConsole": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Default **Device Console** state used when a newly added port is opened. Device Console hands the terminal over to the device: every keystroke (Ctrl+C, Ctrl+D, Tab, arrow keys) is sent the instant you press it, and the device controls the screen itself — what a MicroPython REPL, a Zephyr or ESP-IDF shell, a bootloader menu or any full-screen device UI needs. Off, the terminal edits a line locally (history, cursor keys, Ctrl+L) and sends it on Enter. Recording is unaffected either way."
+        },
         "serialPort.compactTimestamps": {
           "type": "boolean",
           "default": true,
-          "description": "Render timestamps in a compact form (month, day, time, milliseconds — no year or UTC offset) in the terminal and log file. Only affects lines rendered/logged after the setting changes; already-rendered lines are never altered."
+          "description": "Render timestamps in the terminal and log file as the time of day only (\"20:58:48.375\") instead of the default month-day-and-time (\"09-05 20:58:48.375\"). Neither form carries a year or a UTC offset — those are constant for a session and appear on the file's \"# ---\" banner. Only affects lines rendered/logged after the setting changes; already-rendered lines are never altered."
+        },
+        "serialPort.detectSeverity": {
+          "type": "boolean",
+          "default": true,
+          "description": "Recognise the log-level prefix at the start of each received line — ESP-IDF (\"E (1234) tag:\"), Zephyr (\"<err>\"), Linux printk (\"<3>\"), Android (\"E/Tag(123):\"), generic \"[ERROR]\"/\"ERROR:\", and ESP32 crash markers — falling back to the line's own ANSI colour. The terminal colours the row to match and the annotated log fills in the level column of its header. Received lines only: what you send is a command, not a log record."
+        },
+        "serialPort.logFormat": {
+          "type": "string",
+          "enum": [
+            "annotated",
+            "raw"
+          ],
+          "enumDescriptions": [
+            "One readable line per device line, each with a [timestamp MODE DIRECTION] header and, when severity detection is on, a normalised level token. Written to *.serial.log.",
+            "Byte-exact capture of the wire in arrival order — nothing added, stripped or transformed. Written to *.raw.log."
+          ],
+          "default": "annotated",
+          "description": "How a recorded log file is written. Read when recording starts, so changing this never leaves one file holding a mix of both formats; the new value applies the next time recording begins."
         },
         "serialPort.messageGapMs": {
           "type": "number",
           "default": 20,
           "minimum": 0,
-          "description": "Milliseconds of quiet time on the wire used to delimit one received message from the next, so a single message split across multiple physical reads is coalesced into one line instead of rendering as several."
+          "description": "Milliseconds of quiet time on the wire after which an unterminated line is surfaced anyway — a device that prints a prompt like \"esp32> \" and waits sends no newline, so without this the partial line would be held indefinitely. Also the coalescing window for hex-mode receive, where the byte stream has no line structure to split on."
         },
         "serialPort.saveLogAt": {
           "type": "string",
@@ -143,6 +184,40 @@
           "type": "string",
           "default": "#33cc33",
           "description": "Terminal color for received (RX) bytes, as a CSS hex color."
+        },
+        "serialPort.severityColors": {
+          "type": "object",
+          "default": {
+            "ERROR": "#f14c4c",
+            "WARN": "#cca700",
+            "INFO": "#6f9dc0",
+            "DEBUG": "#9d9d9d",
+            "TRACE": "#6e6e6e"
+          },
+          "additionalProperties": false,
+          "properties": {
+            "ERROR": {
+              "type": "string",
+              "description": "Colour for lines detected as ERROR."
+            },
+            "WARN": {
+              "type": "string",
+              "description": "Colour for lines detected as WARN."
+            },
+            "INFO": {
+              "type": "string",
+              "description": "Colour for lines detected as INFO."
+            },
+            "DEBUG": {
+              "type": "string",
+              "description": "Colour for lines detected as DEBUG."
+            },
+            "TRACE": {
+              "type": "string",
+              "description": "Colour for lines detected as TRACE (ESP-IDF verbose, Zephyr <dbg>)."
+            }
+          },
+          "markdownDescription": "Colour of each detected log level, as a CSS hex colour (`#rrggbb`). One palette drives both surfaces: in the terminal it colours the whole row, and in an open `*.serial.log` it colours the level token in the header (with ERROR and WARN also marked in the scrollbar's overview ruler). Set a level to an empty string to turn its override off — that row then keeps the ordinary TX/RX colour, which is what you want if you find recolouring every INFO line too noisy. Editable from the panel's **Default Settings › Level Colours** section. Requires `#serialPort.detectSeverity#`."
         },
         "serialPort.sendTemplates": {
           "type": "array",
@@ -176,6 +251,97 @@
             }
           }
         }
+      }
+    },
+    "languages": [
+      {
+        "id": "serial-log",
+        "aliases": [
+          "Serial Log"
+        ],
+        "filenamePatterns": [
+          "*.serial.log",
+          "*.raw.log"
+        ],
+        "icon": {
+          "light": "./media/serial-log-light.svg",
+          "dark": "./media/serial-log-dark.svg"
+        },
+        "configuration": "./language-configuration.serial-log.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "serial-log",
+        "scopeName": "text.log.serial",
+        "path": "./syntaxes/serial-log.tmLanguage.json"
+      },
+      {
+        "scopeName": "text.log.serial.injection",
+        "path": "./syntaxes/serial-log-injection.tmLanguage.json",
+        "injectTo": [
+          "text.log"
+        ]
+      }
+    ],
+    "configurationDefaults": {
+      "files.associations": {
+        "*.serial.log": "serial-log",
+        "*.raw.log": "serial-log"
+      },
+      "editor.tokenColorCustomizations": {
+        "comment": "Fallback colours for a recorded log's header, for the window before this extension activates. No built-in theme styles the 'log.*' scopes, so without these the level would be theme-foreground on every line, and TX/RX would take whatever a theme happens to give 'keyword'/'support.class' — usually something loud and unrelated. Once the extension is active it decorates the level token, the direction token and the payload from serialPort.severityColors + serialPort.txColor/rxColor instead, and a decoration paints over a token colour — so those settings are what you actually see, and these values only need to match their defaults. The mode column ('ASC'/'HEX') is deliberately dimmed rather than coloured: it repeats on every line and carries the least information in the header. These are contributed as defaults: a user's own editor.tokenColorCustomizations replaces them entirely.",
+        "textMateRules": [
+          {
+            "scope": "log.error.serial",
+            "settings": {
+              "foreground": "#f14c4c",
+              "fontStyle": "bold"
+            }
+          },
+          {
+            "scope": "log.warning.serial",
+            "settings": {
+              "foreground": "#cca700"
+            }
+          },
+          {
+            "scope": "log.info.serial",
+            "settings": {
+              "foreground": "#6f9dc0"
+            }
+          },
+          {
+            "scope": "log.debug.serial",
+            "settings": {
+              "foreground": "#9d9d9d"
+            }
+          },
+          {
+            "scope": "log.verbose.serial",
+            "settings": {
+              "foreground": "#6e6e6e"
+            }
+          },
+          {
+            "scope": "storage.type.mode.log.serial",
+            "settings": {
+              "foreground": "#6e6e6e"
+            }
+          },
+          {
+            "scope": "support.class.direction.rx.log.serial",
+            "settings": {
+              "foreground": "#33cc33"
+            }
+          },
+          {
+            "scope": "keyword.control.direction.tx.log.serial",
+            "settings": {
+              "foreground": "#00cccc"
+            }
+          }
+        ]
       }
     },
     "problemMatchers": [

@@ -1,8 +1,16 @@
 import * as vscode from 'vscode';
 import { SerialPort } from 'serialport';
-import { ConnectionManager, DEFAULT_PORT_CONFIG, FormatSettings, PortConfig } from '../serial/connectionManager';
-import { asciiStringToBytes, hexStringToBytes, normalizeHexString } from '../serial/format';
+import {
+  ConnectionManager,
+  DEFAULT_PORT_CONFIG,
+  FormatSettings,
+  LogFormat,
+  PortConfig,
+} from '../serial/connectionManager';
+import { asciiStringToBytes, concatBytes, hexStringToBytes, LINE_ENDING_BYTES, LineEnding } from '../serial/format';
+import type { Severity } from '../serial/lineAssembler';
 import { createSerialTerminal, SerialTerminal, TerminalColors } from '../serial/pseudoterminal';
+import { DEFAULT_SEVERITY_COLORS, readSeverityColors, SeverityColors } from '../severityColors';
 import { SendFormat, TemplateStore } from '../templates/templateStore';
 
 const REFRESH_DEBOUNCE_MS = 150;
@@ -50,8 +58,14 @@ function buildPortDescription(port: {
 }
 
 type SettingField = 'baudRate' | 'dataBits' | 'parity' | 'stopBits';
-type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp' | 'rts' | 'dtr';
-type DefaultCheckbox = 'hexSend' | 'hexRecv' | 'showTimestamp' | 'compactTimestamps';
+type SessionCheckbox = 'hexSend' | 'hexRecv' | 'record' | 'showTimestamp' | 'deviceConsole' | 'rts' | 'dtr';
+type DefaultCheckbox =
+  | 'hexSend'
+  | 'hexRecv'
+  | 'showTimestamp'
+  | 'compactTimestamps'
+  | 'detectSeverity'
+  | 'deviceConsole';
 type TerminalColorKey = 'tx' | 'rx';
 
 type ClientMessage =
@@ -64,9 +78,15 @@ type ClientMessage =
   | { type: 'updateDefaultSetting'; field: SettingField; value: string }
   | { type: 'updateDefaultCheckbox'; checkbox: DefaultCheckbox; value: boolean }
   | { type: 'updateMessageGapMs'; value: number }
+  | { type: 'updateLogFormat'; value: LogFormat }
+  | { type: 'updateDefaultLineEnding'; value: LineEnding }
   | { type: 'updateTerminalColor'; which: TerminalColorKey; value: string }
+  | { type: 'updateSeverityColor'; severity: Severity; value: string }
+  | { type: 'resetSeverityColors' }
+  | { type: 'openExtensionSettings' }
   | { type: 'updateSessionBaudRate'; path: string; baudRate: number }
   | { type: 'updateSessionSetting'; path: string; field: 'dataBits' | 'parity' | 'stopBits'; value: string }
+  | { type: 'updateSessionLineEnding'; path: string; value: LineEnding }
   | { type: 'setCheckbox'; path: string; checkbox: SessionCheckbox; value: boolean }
   | { type: 'addTemplate'; name: string; format: SendFormat; data: string }
   | { type: 'updateTemplate'; id: string; name: string; format: SendFormat; data: string }
@@ -83,6 +103,10 @@ interface StoredSessionMeta {
   hexSend: boolean;
   hexRecv: boolean;
   showTimestamp: boolean;
+  /** Optional so a `closedMeta` entry persisted by an older version of the extension (which had
+   * neither field) still parses; the `??` fallbacks at every read site supply the default. */
+  lineEnding?: LineEnding;
+  deviceConsole?: boolean;
   rts: boolean;
   dtr: boolean;
   /** Whether "Record to File" was checked — kept independent of `connected` so it can be set (and
@@ -104,6 +128,8 @@ interface PanelSession {
   hexRecv: boolean;
   recording: boolean;
   showTimestamp: boolean;
+  lineEnding: LineEnding;
+  deviceConsole: boolean;
   rts: boolean;
   dtr: boolean;
   logFilePath: string | undefined;
@@ -120,8 +146,13 @@ interface PanelState {
   defaultShowTimestamp: boolean;
   compactTimestamps: boolean;
   messageGapMs: number;
+  logFormat: LogFormat;
+  detectSeverity: boolean;
+  defaultLineEnding: LineEnding;
+  defaultDeviceConsole: boolean;
   txColor: string;
   rxColor: string;
+  severityColors: SeverityColors;
   saveLogAt: string;
   saveLogAtIsCustom: boolean;
   sessions: PanelSession[];
@@ -136,16 +167,25 @@ interface PanelState {
 export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view: vscode.WebviewView | undefined;
   private selectedPort: string | undefined;
-  /** User-configurable TX/RX terminal colors, passed by reference into every open terminal so a
-   * change here is visible live without reopening the port — see `TerminalColors`. Populated from
-   * (and kept in sync with) `serialPort.txColor`/`serialPort.rxColor`, but the object itself is
-   * never reassigned. */
-  private readonly terminalColors: TerminalColors = { tx: DEFAULT_TX_COLOR, rx: DEFAULT_RX_COLOR };
+  /** User-configurable terminal colors (TX/RX and the per-severity palette), passed by reference
+   * into every open terminal so a change here is visible live without reopening the port — see
+   * `TerminalColors`. Populated from (and kept in sync with) `serialPort.txColor`/`rxColor`/
+   * `severityColors`, but the object itself is never reassigned. */
+  private readonly terminalColors: TerminalColors = {
+    tx: DEFAULT_TX_COLOR,
+    rx: DEFAULT_RX_COLOR,
+    severity: { ...DEFAULT_SEVERITY_COLORS },
+  };
   /** Live-configurable compact-timestamp/message-gap settings, passed by reference into every open
    * `PortConnection` and terminal so a change here is visible live without reopening the port — see
    * `FormatSettings`. Populated from (and kept in sync with) `serialPort.compactTimestamps`/
    * `serialPort.messageGapMs`, but the object itself is never reassigned. */
-  private readonly formatSettings: FormatSettings = { compactTimestamps: true, messageGapMs: 20 };
+  private readonly formatSettings: FormatSettings = {
+    compactTimestamps: true,
+    messageGapMs: 20,
+    logFormat: 'annotated',
+    detectSeverity: true,
+  };
   private ports: { path: string; description: string }[] = [];
   /** Paths ever added via the "+" button, in add-order. A session card renders for every entry
    * here regardless of whether its port is currently open — see `closedMeta` below. */
@@ -182,8 +222,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     this.subscriptions.push(connections.onDidChange(() => this.syncTerminalConnections()));
     this.terminalColors.tx = this.config().get<string>('txColor', DEFAULT_TX_COLOR);
     this.terminalColors.rx = this.config().get<string>('rxColor', DEFAULT_RX_COLOR);
-    this.formatSettings.compactTimestamps = this.config().get<boolean>('compactTimestamps', true);
-    this.formatSettings.messageGapMs = this.config().get<number>('messageGapMs', 20);
+    this.syncSeverityColors();
+    this.syncFormatSettings();
     this.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (!e.affectsConfiguration('serialPort')) {
@@ -191,11 +231,29 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         }
         this.terminalColors.tx = this.config().get<string>('txColor', DEFAULT_TX_COLOR);
         this.terminalColors.rx = this.config().get<string>('rxColor', DEFAULT_RX_COLOR);
-        this.formatSettings.compactTimestamps = this.config().get<boolean>('compactTimestamps', true);
-        this.formatSettings.messageGapMs = this.config().get<number>('messageGapMs', 20);
+        this.syncSeverityColors();
+        this.syncFormatSettings();
         this.postState();
       }),
     );
+  }
+
+  /** Refreshes the shared-by-reference severity palette from configuration. Mutates the same object
+   * every open terminal already holds (never reassigns it), which is what makes a colour change in
+   * the panel — or in `settings.json` — recolour the next line on an already-open port. */
+  private syncSeverityColors(): void {
+    Object.assign(this.terminalColors.severity, readSeverityColors());
+  }
+
+  /** Refreshes the shared-by-reference `formatSettings` from configuration. Mutates in place (never
+   * reassigns the object) so every already-open connection and terminal holding the same reference
+   * sees the change on its next format/flush without reopening the port. */
+  private syncFormatSettings(): void {
+    const config = this.config();
+    this.formatSettings.compactTimestamps = config.get<boolean>('compactTimestamps', true);
+    this.formatSettings.messageGapMs = config.get<number>('messageGapMs', 20);
+    this.formatSettings.logFormat = config.get<LogFormat>('logFormat', 'annotated');
+    this.formatSettings.detectSeverity = config.get<boolean>('detectSeverity', true);
   }
 
   /** Reads the `serialPort.*` configuration section, merged across User/Workspace/Folder scope —
@@ -227,6 +285,14 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     return this.config().get<boolean>('defaultShowTimestamp', false);
   }
 
+  private getDefaultLineEnding(): LineEnding {
+    return this.config().get<LineEnding>('defaultLineEnding', 'crlf');
+  }
+
+  private getDefaultDeviceConsole(): boolean {
+    return this.config().get<boolean>('defaultDeviceConsole', false);
+  }
+
   /** Persists `sessionOrder`/`closedMeta` to `globalState` so both survive an extension-host
    * restart (window reload, VS Code update, crash) instead of being wiped every time. */
   private persistSessions(): void {
@@ -244,6 +310,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       hexSend: previous?.hexSend ?? this.getDefaultHexSend(),
       hexRecv: previous?.hexRecv ?? this.getDefaultHexRecv(),
       showTimestamp: previous?.showTimestamp ?? this.getDefaultShowTimestamp(),
+      lineEnding: previous?.lineEnding ?? this.getDefaultLineEnding(),
+      deviceConsole: previous?.deviceConsole ?? this.getDefaultDeviceConsole(),
       rts: previous?.rts ?? false,
       dtr: previous?.dtr ?? false,
       recording: previous?.recording ?? false,
@@ -310,6 +378,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           hexRecv: 'defaultHexRecv',
           showTimestamp: 'defaultShowTimestamp',
           compactTimestamps: 'compactTimestamps',
+          detectSeverity: 'detectSeverity',
+          deviceConsole: 'defaultDeviceConsole',
         };
         void this.config()
           .update(configKey[message.checkbox], message.value, vscode.ConfigurationTarget.Global)
@@ -317,6 +387,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
             () => {
               if (message.checkbox === 'compactTimestamps') {
                 this.formatSettings.compactTimestamps = message.value;
+              } else if (message.checkbox === 'detectSeverity') {
+                this.formatSettings.detectSeverity = message.value;
               }
               this.postState();
             },
@@ -335,6 +407,27 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
             (err) => vscode.window.showErrorMessage(`Failed to update setting: ${errorMessage(err)}`),
           );
         break;
+      case 'updateLogFormat':
+        void this.config()
+          .update('logFormat', message.value, vscode.ConfigurationTarget.Global)
+          .then(
+            () => {
+              // Only affects recordings started from here on — an in-progress recording keeps the
+              // format it began with, so no one file ever mixes annotated lines with raw bytes.
+              this.formatSettings.logFormat = message.value;
+              this.postState();
+            },
+            (err) => vscode.window.showErrorMessage(`Failed to update log format: ${errorMessage(err)}`),
+          );
+        break;
+      case 'updateDefaultLineEnding':
+        void this.config()
+          .update('defaultLineEnding', message.value, vscode.ConfigurationTarget.Global)
+          .then(
+            () => this.postState(),
+            (err) => vscode.window.showErrorMessage(`Failed to update line ending: ${errorMessage(err)}`),
+          );
+        break;
       case 'updateTerminalColor':
         void this.config()
           .update(message.which === 'tx' ? 'txColor' : 'rxColor', message.value, vscode.ConfigurationTarget.Global)
@@ -346,18 +439,50 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
             (err) => vscode.window.showErrorMessage(`Failed to update terminal color: ${errorMessage(err)}`),
           );
         break;
+      case 'updateSeverityColor': {
+        // The whole object is written, not just the one key: VS Code stores an object setting
+        // wholesale, so writing a single key would drop the other four back to their defaults.
+        const next: SeverityColors = { ...readSeverityColors(), [message.severity]: message.value };
+        void this.config()
+          .update('severityColors', next, vscode.ConfigurationTarget.Global)
+          .then(
+            () => {
+              this.syncSeverityColors();
+              this.postState();
+            },
+            (err) => vscode.window.showErrorMessage(`Failed to update level colour: ${errorMessage(err)}`),
+          );
+        break;
+      }
+      case 'resetSeverityColors':
+        void this.config()
+          .update('severityColors', undefined, vscode.ConfigurationTarget.Global)
+          .then(
+            () => {
+              this.syncSeverityColors();
+              this.postState();
+            },
+            (err) => vscode.window.showErrorMessage(`Failed to reset level colours: ${errorMessage(err)}`),
+          );
+        break;
+      case 'openExtensionSettings':
+        void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:haleywang.vscode-serial-port');
+        break;
       case 'updateSessionBaudRate':
         void this.updateSessionBaudRate(message.path, message.baudRate);
         break;
       case 'updateSessionSetting':
         this.updateSessionSetting(message.path, message.field, message.value);
         break;
+      case 'updateSessionLineEnding':
+        this.updateSessionLineEnding(message.path, message.value);
+        break;
       case 'setCheckbox':
         this.setCheckbox(message.path, message.checkbox, message.value);
         break;
       case 'addTemplate':
         void this.templates
-          .add({ name: message.name, format: message.format, data: normalizeTemplateData(message.format, message.data) })
+          .add({ name: message.name, format: message.format, data: message.data })
           .then(
             () => this.postState(),
             (err) => vscode.window.showErrorMessage(`Failed to save template: ${errorMessage(err)}`),
@@ -365,7 +490,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         break;
       case 'updateTemplate':
         void this.templates
-          .update(message.id, { name: message.name, format: message.format, data: normalizeTemplateData(message.format, message.data) })
+          .update(message.id, { name: message.name, format: message.format, data: message.data })
           .then(
             () => this.postState(),
             (err) => vscode.window.showErrorMessage(`Failed to save template: ${errorMessage(err)}`),
@@ -514,6 +639,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           hexSend: connection.hexSend,
           hexRecv: connection.hexRecv,
           showTimestamp: connection.showTimestamp,
+          lineEnding: connection.lineEnding,
+          deviceConsole: connection.deviceConsole,
           rts: connection.rts,
           dtr: connection.dtr,
           recording: connection.recording,
@@ -526,6 +653,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       connection.setHexSend(meta?.hexSend ?? this.getDefaultHexSend());
       connection.setHexRecv(meta?.hexRecv ?? this.getDefaultHexRecv());
       connection.setShowTimestamp(meta?.showTimestamp ?? this.getDefaultShowTimestamp());
+      connection.setLineEnding(meta?.lineEnding ?? this.getDefaultLineEnding());
+      connection.setDeviceConsole(meta?.deviceConsole ?? this.getDefaultDeviceConsole());
       if (meta?.recording) {
         // RF was already checked before this open (or survives from a prior open of the same
         // session) — reuse the same file (if one exists yet) rather than starting a new one, so a
@@ -597,6 +726,24 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     this.postState();
   }
 
+  /** Unlike the port-config fields above, the line ending applies to a *live* connection too — it
+   * only affects what gets appended to the next send, so there's nothing to reopen for. */
+  private updateSessionLineEnding(path: string, value: LineEnding): void {
+    const connection = this.connections.get(path);
+    if (connection) {
+      connection.setLineEnding(value);
+      this.postState();
+      return;
+    }
+    const meta = this.closedMeta.get(path);
+    if (!meta) {
+      return;
+    }
+    meta.lineEnding = value;
+    this.persistSessions();
+    this.postState();
+  }
+
   private async browseLogFolder(): Promise<void> {
     const picked = await vscode.window.showOpenDialog({
       canSelectFolders: true,
@@ -664,6 +811,9 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         case 'showTimestamp':
           connection.setShowTimestamp(value);
           break;
+        case 'deviceConsole':
+          connection.setDeviceConsole(value);
+          break;
         case 'rts':
           void connection.setRTS(value).catch((err) => {
             vscode.window.showErrorMessage(`Failed to set RTS for ${path}: ${errorMessage(err)}`);
@@ -709,9 +859,14 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       return;
     }
     try {
-      const hex = template.format === 'hex';
-      const bytes = hex ? hexStringToBytes(template.data) : asciiStringToBytes(template.data);
-      await connection.write(bytes, hex);
+      // ASCII templates are commands and need the session's terminator to be acted on, exactly as a
+      // line typed into the terminal does. Hex templates are byte-exact payloads — appending
+      // anything to one would corrupt it — so they are sent verbatim.
+      const bytes =
+        template.format === 'hex'
+          ? hexStringToBytes(template.data)
+          : concatBytes(asciiStringToBytes(template.data), LINE_ENDING_BYTES[connection.lineEnding]);
+      await connection.write(bytes);
     } catch (err) {
       vscode.window.showErrorMessage(`Failed to send template: ${errorMessage(err)}`);
     }
@@ -761,8 +916,13 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       defaultShowTimestamp: this.getDefaultShowTimestamp(),
       compactTimestamps: this.formatSettings.compactTimestamps,
       messageGapMs: this.formatSettings.messageGapMs,
+      logFormat: this.formatSettings.logFormat,
+      detectSeverity: this.formatSettings.detectSeverity,
+      defaultLineEnding: this.getDefaultLineEnding(),
+      defaultDeviceConsole: this.getDefaultDeviceConsole(),
       txColor: this.terminalColors.tx,
       rxColor: this.terminalColors.rx,
+      severityColors: { ...this.terminalColors.severity },
       saveLogAt: this.config().get<string>('saveLogAt', DEFAULT_SAVE_LOG_AT),
       saveLogAtIsCustom: this.config().get<string>('saveLogAt', DEFAULT_SAVE_LOG_AT).trim() !== DEFAULT_SAVE_LOG_AT,
       sessions: this.sessionOrder.map((path) => {
@@ -776,6 +936,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
             hexRecv: connection.hexRecv,
             recording: connection.recording,
             showTimestamp: connection.showTimestamp,
+            lineEnding: connection.lineEnding,
+            deviceConsole: connection.deviceConsole,
             rts: connection.rts,
             dtr: connection.dtr,
             logFilePath: connection.logFilePath,
@@ -792,6 +954,8 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           hexRecv: meta?.hexRecv ?? defaultHexRecv,
           recording: meta?.recording ?? false,
           showTimestamp: meta?.showTimestamp ?? this.getDefaultShowTimestamp(),
+          lineEnding: meta?.lineEnding ?? this.getDefaultLineEnding(),
+          deviceConsole: meta?.deviceConsole ?? this.getDefaultDeviceConsole(),
           rts: meta?.rts ?? false,
           dtr: meta?.dtr ?? false,
           logFilePath: meta?.logFilePath,
@@ -826,15 +990,6 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** Normalizes a Send Template's data before it's persisted: a hex-format template's text is
- * round-tripped through `normalizeHexString` (padding an odd trailing digit with a 0, the same
- * convention `hexStringToBytes` already applies at send time — see there) so the *saved* text is
- * always valid, even-length hex, not just the bytes actually transmitted. An ASCII-format
- * template's data passes through unchanged; hex normalization has no meaning for it. */
-function normalizeTemplateData(format: SendFormat, data: string): string {
-  return format === 'hex' ? normalizeHexString(data) : data;
 }
 
 function getNonce(): string {

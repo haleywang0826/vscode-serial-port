@@ -1,13 +1,15 @@
 import * as vscode from 'vscode';
-import { FormatSettings, PortConnection, TrafficEvent } from './connectionManager';
+import { FormatSettings, PortConnection, TrafficRecord } from './connectionManager';
+import type { SeverityColors } from '../severityColors';
 import {
   appendHexInputChar,
   asciiStringToBytes,
-  formatBytes,
-  formatBytesForTerminal,
+  bytesToHex,
+  concatBytes,
   formatTrafficHeader,
   hexStringToBytes,
   isHexDigitChar,
+  LINE_ENDING_BYTES,
 } from './format';
 
 const ENTER = '\r';
@@ -21,21 +23,19 @@ const DEFAULT_COLUMNS = 80;
 /** Cap on recalled input lines (Up/Down history) — a generous bound for interactive serial
  * debugging without letting the array grow unbounded over a long session. */
 const HISTORY_LIMIT = 100;
-/** Cap on output buffered while the pty is not yet open (see `pendingOutput`). Generous enough to
- * hold a long pre-reveal session, bounded so a terminal that is never revealed can't grow forever;
- * trimming always drops whole lines off the front, never splitting an escape sequence. */
-const PENDING_OUTPUT_MAX_CHARS = 64 * 1024;
-/** Quiet period after the last `setDimensions` call before the terminal repaints itself once more
- * (see `scheduleResizeSettle`). Long enough to coalesce a drag's worth of resize events and let
- * xterm.js finish reflowing, short enough that the corrected frame lands while the user is still
- * looking at the result of their drag. */
-const RESIZE_SETTLE_MS = 80;
 /** DECSCUSR cursor-shape escapes (`CSI Ps SP q`, supported by VS Code's xterm.js-based terminal
  * renderer): a thin steady bar for insert mode (matches the vim/readline convention that a bar
  * cursor means "typing inserts"), a steady block for overwrite mode (typing replaces the character
  * under the cursor) — toggled by the Insert key. */
 const CURSOR_STYLE_INSERT = '\x1b[6 q';
 const CURSOR_STYLE_OVERWRITE = '\x1b[2 q';
+
+/** DECSC/DECRC. Used to re-find the end of a row that an idle-flushed partial line left open, so
+ * the rest of that device line lands on the same row instead of starting a new one with a second,
+ * duplicate header. Saving after the write means a line long enough to wrap has already scrolled by
+ * then, so the restored position is still the true end of the text. */
+const SAVE_CURSOR = '\x1b7';
+const RESTORE_CURSOR = '\x1b8';
 
 const RESET = '\x1b[0m';
 const DIM = '\x1b[90m';
@@ -60,12 +60,16 @@ export interface SerialTerminal {
   dispose(): void;
 }
 
-/** User-configurable TX/RX terminal colors (hex, e.g. "#00cccc"), shared by reference from
+/** User-configurable terminal colors (hex, e.g. "#00cccc"), shared by reference from
  * `SerialPanelProvider` so a color change in Default Settings applies live to every already-open
  * terminal without needing to reopen the port. */
 export interface TerminalColors {
   tx: string;
   rx: string;
+  /** Per-severity row colour, from `serialPort.severityColors`. An empty string for a level means
+   * "no override" — a row detected at that level keeps the ordinary TX/RX colour. Mutated in place
+   * by the provider, never reassigned, for the same live-update reason as `tx`/`rx` above. */
+  severity: SeverityColors;
 }
 
 /**
@@ -75,13 +79,15 @@ export interface TerminalColors {
  * port opens and closes, without ever recreating the underlying `vscode.Terminal`. This is what
  * lets a session's terminal (and its scrollback) survive a close/reopen cycle.
  *
- * While attached, every TX/RX event is rendered live (colored by direction, formatted per the
- * connection's hex/ascii toggles, optionally timestamped) and whatever the user types is sent on
- * Enter. TX is rendered from the connection's `onDidTraffic` event, the same source the file log
- * reads from, so a template send (or any other write) shows up here too — not just terminal-typed
- * input. While "hex send" is on, non-hex-digit keystrokes are rejected as they're typed, and a
- * space is auto-inserted between each typed byte pair (see `appendHexInputChar`) so the user never
- * has to type the separating spaces themselves.
+ * While attached, every TX/RX record is rendered live — one terminal row per device line, each
+ * carrying its own timestamp (when "Show timestamp" is on), coloured by the device's own ANSI
+ * colours if it set any, otherwise by detected severity, otherwise by the configured TX/RX colour.
+ * Whatever the user types is sent on Enter, followed by the session's configured line ending. TX is
+ * rendered from the connection's `onDidRecord` event, the same source the file log reads from, so a
+ * template send (or any other write) shows up here too — not just terminal-typed input. While "hex
+ * send" is on, non-hex-digit keystrokes are rejected as they're typed, and a space is auto-inserted
+ * between each typed byte pair (see `appendHexInputChar`) so the user never has to type the
+ * separating spaces themselves.
  *
  * The input line is pinned to the terminal's actual bottom row via an ANSI scroll region
  * (DECSTBM, `\x1b[<top>;<bottom>r`) confined to rows 1..rows-1 — the same mechanism tmux's status
@@ -89,12 +95,14 @@ export interface TerminalColors {
  * scrolls independently), while the last row sits outside the region and is only ever redrawn in
  * place, never scrolled — that's what keeps it pinned even when there isn't much content yet.
  *
- * All of that positioning depends on knowing the terminal's real geometry, which VS Code only
- * supplies when it calls `pty.open()` — and it only does that when the terminal is first actually
- * rendered, which for a session added but never revealed may be long after its port opened and
- * started carrying traffic. Anything fired into the write emitter before then is silently dropped
- * by VS Code. So output produced while `opened` is false is buffered into `pendingOutput` and
- * replayed, in order, from `open()`; see that field's comment.
+ * **Device Console mode** (the session's "Device Console" toggle) turns all of that off and hands
+ * the terminal over to the device instead: the scroll region is released, the pinned row
+ * disappears, incoming bytes are written through untouched (cursor movement, erase, full-screen
+ * redraws and all), and every keystroke — Ctrl+C, Ctrl+D, arrow keys — goes straight to the device.
+ * That is what a MicroPython REPL, a Zephyr shell or an ESP-IDF console needs, and none of it is
+ * possible while a pinned row owns the bottom of the screen. Line editing, local history and Ctrl+L
+ * are line-mode features and are unavailable while it is on. Logging is unaffected: the connection
+ * keeps assembling and recording lines from the same bytes either way.
  *
  * Ctrl+L clears the screen, matching the same convention used by bash/zsh's readline
  * clear-screen binding, tmux, and other terminal-based tools, so it works the way anyone coming
@@ -144,16 +152,19 @@ export function createSerialTerminal(
    * multiple `handleInput` calls, since VS Code's pty doesn't guarantee a multi-byte sequence
    * arrives in a single call. Reset to '' once a sequence resolves (recognized or discarded). */
   let escapeBuffer = '';
-  /** Traffic/banner text produced before VS Code has called `pty.open()`, replayed in order once it
-   * does. VS Code only subscribes to `onDidWrite` at open time, and only calls `open()` when the
-   * terminal is first actually rendered — so anything fired into `writeEmitter` before then is
-   * silently discarded. A session whose port is opened (and starts sending/receiving) while its
-   * terminal has never been revealed would therefore lose that traffic from the terminal entirely,
-   * even though the file log — reading the very same `TrafficEvent`s — recorded all of it. That
-   * mismatch is what "the log file is correct, but the terminal is not" was. Only the raw text is
-   * buffered, never the cursor-positioning escapes around it: `rows` isn't known until `open()`
-   * either, so the positioning has to be computed at replay time, not at print time. */
-  let pendingOutput = '';
+  /** The direction whose idle-flushed partial line left a row open at the bottom of the scroll
+   * region, if any. The next record for that same direction is appended to that row rather than
+   * starting a new one; anything else closes it first, so the saved cursor position can never be
+   * invalidated by an intervening scroll. */
+  let openRow: 'TX' | 'RX' | undefined;
+  /** Decodes device-console bytes across reads so a multi-byte character split between two reads
+   * doesn't render as two replacement characters. Only used while Device Console is on; line mode
+   * gets its text already decoded, from the connection's assembler. */
+  let consoleDecoder = new TextDecoder('utf-8', { fatal: false });
+  /** Mirrors the connection's `deviceConsole` flag. Kept separately so the transition can be
+   * detected in `syncDeviceConsole` — entering and leaving each need one-time screen surgery
+   * (releasing and re-establishing the scroll region), not just a different rendering path. */
+  let consoleActive = false;
 
   let connection: PortConnection | undefined;
   let connected = false;
@@ -163,42 +174,29 @@ export function createSerialTerminal(
    * and skip firing `onDidUserClose` for the former. */
   let disposing = false;
 
-  /** Pending trailing repaint after a resize burst — see `scheduleResizeSettle`. */
-  let resizeSettleTimer: ReturnType<typeof setTimeout> | undefined;
-
   let trafficSub: vscode.Disposable | undefined;
+  let rawSub: vscode.Disposable | undefined;
   let updateSub: vscode.Disposable | undefined;
   let connectionCloseSub: vscode.Disposable | undefined;
 
-  /**
-   * The DECSTBM sequence confining scrolling to rows 1..rows-1, so the last row can hold the
-   * pinned input line. Re-emitted as part of *every* write (see `render`) instead of once at
-   * `open()`/resize time: xterm.js resets the scroll margins to the full screen whenever its
-   * buffer is resized, including the internal resize VS Code performs right after calling
-   * `open()` — before which we've already sent our region. A lost region is invisible until
-   * output stops scrolling: `printAboveInput` writes at row `rows - 1` expecting that to be the
-   * region's bottom margin (so the trailing newline scrolls it), but with the margins reset to
-   * the real screen height that row is mid-screen, the newline just moves the cursor down instead
-   * of scrolling, and the next write jumps back and overwrites the same row — the terminal shows
-   * only the newest line no matter how much traffic arrives, while the file log (reading the same
-   * events) is complete. Resizing the window "fixed" it purely because that was the one path that
-   * re-sent the region. Re-asserting it costs a handful of bytes per write and makes the display
-   * self-healing against anything that clears the margins, rather than depending on us catching
-   * every event that could.
-   */
-  const scrollRegionSequence = (): string => (rows > 1 ? `\x1b[1;${rows - 1}r` : '');
+  const setScrollRegion = (): void => {
+    writeEmitter.fire(`\x1b[1;${rows - 1}r`);
+  };
 
-  /** Builds (but does not emit) the pinned input row: prompt + the input line clipped to a
-   * horizontally-scrolling window that always keeps the cursor visible and never exceeds the
-   * terminal's actual width. This clipping is what prevents the input line from ever wrapping onto
-   * a second physical row — previously, a line long enough to overflow the terminal's width (with
-   * no `columns` tracking at all) would wrap, and the redraw/erase logic only ever touched the
-   * single pinned row, leaving stale wrapped characters behind and corrupting the display on the
-   * next redraw. The window (`offset`) is recomputed fresh from `cursorPos` on every call rather
-   * than persisted, so moving the cursor in either direction naturally scrolls the window to follow
-   * it. Also positions the real terminal cursor at its on-screen column and sets its DECSCUSR shape
-   * per `insertMode`. */
-  const inputLineSequence = (): string => {
+  /** Redraws the pinned input row: prompt + the input line clipped to a horizontally-scrolling
+   * window that always keeps the cursor visible and never exceeds the terminal's actual width.
+   * This clipping is what prevents the input line from ever wrapping onto a second physical row —
+   * previously, a line long enough to overflow the terminal's width (with no `columns` tracking at
+   * all) would wrap, and the redraw/erase logic only ever touched the single pinned row, leaving
+   * stale wrapped characters behind and corrupting the display on the next redraw. The window
+   * (`offset`) is recomputed fresh from `cursorPos` on every call rather than persisted, so moving
+   * the cursor in either direction naturally scrolls the window to follow it. Also positions the
+   * real terminal cursor at its on-screen column and sets its DECSCUSR shape per `insertMode`.
+   * A no-op in Device Console mode, which has no pinned row to draw. */
+  const redrawInputLine = (): void => {
+    if (consoleActive) {
+      return;
+    }
     const prompt = promptFor();
     const displayLine = connected ? line : '';
     const displayCursorPos = connected ? cursorPos : 0;
@@ -207,55 +205,27 @@ export function createSerialTerminal(
     const clipped = displayLine.slice(offset, offset + available);
     const cursorCol = prompt.length + (displayCursorPos - offset) + 1;
     const cursorStyle = insertMode ? CURSOR_STYLE_INSERT : CURSOR_STYLE_OVERWRITE;
-    return `\x1b[${rows};1H\x1b[2K${prompt}${clipped}\x1b[${rows};${cursorCol}H${cursorStyle}`;
+    writeEmitter.fire(`\x1b[${rows};1H\x1b[2K${prompt}${clipped}\x1b[${rows};${cursorCol}H${cursorStyle}`);
   };
 
-  /** The single write path for everything this terminal displays: re-asserts the scroll region,
-   * optionally prints `text` (which must end in `\r\n`) into it at the region's bottom margin, and
-   * redraws the pinned input row — all as ONE `writeEmitter.fire()`, so no other write can ever
-   * land between the parts and leave the display half-updated. The output row is erased
-   * (`\x1b[2K`) before it's written, so a shorter new line can never leave a longer previous
-   * line's trailing characters dangling on screen. Before the pty is open, `text` is buffered
-   * instead (see `pendingOutput`) rather than fired into a `writeEmitter` nobody is listening to
-   * yet. */
-  const render = (text?: string): void => {
-    if (!opened) {
-      if (text) {
-        pendingOutput += text;
-        if (pendingOutput.length > PENDING_OUTPUT_MAX_CHARS) {
-          // Drop whole lines off the front, never a partial one — slicing mid-escape-sequence would
-          // replay a truncated escape and corrupt the display.
-          const cut = pendingOutput.indexOf('\n', pendingOutput.length - PENDING_OUTPUT_MAX_CHARS);
-          pendingOutput = cut === -1 ? '' : pendingOutput.slice(cut + 1);
-        }
-      }
-      return; // `rows`/`columns` aren't known yet; `open()` draws everything once they are
+  /** Writes text (must end `\r\n`) into the scroll region, then restores the pinned input line. */
+  const printAboveInput = (text: string): void => {
+    closeOpenRow();
+    writeEmitter.fire(`\x1b[${rows - 1};1H${text}`);
+    redrawInputLine();
+  };
+
+  /** Terminates a row an earlier partial line left open, so whatever prints next starts cleanly on
+   * its own row. The device may still finish that line later; it simply gets its own row and header
+   * at that point, which is the honest rendering — the alternative is re-anchoring to a saved cursor
+   * position that an intervening scroll has already invalidated. */
+  function closeOpenRow(): void {
+    if (!openRow) {
+      return;
     }
-    const body = text ? `\x1b[${Math.max(1, rows - 1)};1H\x1b[2K${text}` : '';
-    writeEmitter.fire(`${scrollRegionSequence()}${body}${inputLineSequence()}`);
-  };
-
-  const redrawInputLine = (): void => render();
-
-  /** Writes one traffic line or banner into the scroll region above the pinned input row. */
-  const printAboveInput = (text: string): void => render(text);
-
-  /** Trailing redraw after a burst of resize activity settles. VS Code delivers `setDimensions`
-   * while the user is still dragging, and xterm.js reflows its buffer asynchronously around those
-   * calls, so a redraw issued mid-drag can be rendered against geometry that's already stale by
-   * the time it lands. Coalescing one final redraw once the geometry stops changing repaints the
-   * input row (and re-asserts the scroll region) against the settled dimensions, which is what
-   * clears up the leftover/duplicated rows seen while resizing quickly. Only ever a repaint of
-   * state we already hold — dropping it would cost correctness of the display, never data. */
-  const scheduleResizeSettle = (): void => {
-    if (resizeSettleTimer) {
-      clearTimeout(resizeSettleTimer);
-    }
-    resizeSettleTimer = setTimeout(() => {
-      resizeSettleTimer = undefined;
-      render();
-    }, RESIZE_SETTLE_MS);
-  };
+    openRow = undefined;
+    writeEmitter.fire(`${RESTORE_CURSOR}${RESET}\r\n`);
+  }
 
   function promptFor(): string {
     if (!connected || !connection) {
@@ -264,39 +234,112 @@ export function createSerialTerminal(
     return connection.hexSend ? 'hex> ' : '> ';
   }
 
-  function subscribeToConnection(conn: PortConnection): void {
-    trafficSub = conn.onDidTraffic((event) => {
-      try {
-        printAboveInput(formatTrafficLine(conn, event, colors, formatSettings));
-      } catch {
-        // Defensive backstop: a malformed/unexpected event should never leave the terminal in a
-        // corrupted or stuck state (e.g. a partially-written scroll-region escape) — degrade to a
-        // plain hex dump instead of breaking the whole session's display.
-        printAboveInput(`${DIM}[render error]${RESET} ${formatBytes(event.bytes, true)}\r\n`);
-      }
-    });
-    updateSub = conn.onDidUpdate(() => redrawInputLine());
-    connectionCloseSub = conn.onDidClose(() => detach());
+  /**
+   * Renders one record as a terminal row.
+   *
+   * Colour precedence is **device → severity → configured**: if the device coloured the line
+   * itself, that is left strictly alone (overriding it would defeat the entire point of ANSI
+   * support); otherwise a detected severity colours the row; otherwise the user's configured TX/RX
+   * colour applies. The `[timestamp MODE DIR]` header is always dim, so it never competes with the
+   * payload for attention.
+   */
+  function printRecord(conn: PortConnection, record: TrafficRecord): void {
+    if (record.kind === 'hex') {
+      const color = ansiTruecolor(record.direction === 'TX' ? colors.tx : colors.rx);
+      printAboveInput(
+        `${headerFor(conn, record.timestamp, record.direction, true)}${color}${bytesToHex(record.bytes)}${RESET}\r\n`,
+      );
+      return;
+    }
+    const appending = record.continued && openRow === record.direction;
+    if (!appending) {
+      closeOpenRow();
+    }
+    const deviceColored = record.render.includes(ESC);
+    // `||`, not `??`: an empty severity colour means "no override", so it has to fall through to
+    // the configured direction colour rather than winning as a valid-but-empty value.
+    const severityColor = record.severity ? ansiTruecolor(colors.severity[record.severity]) : '';
+    const color = deviceColored ? '' : severityColor || ansiTruecolor(record.direction === 'TX' ? colors.tx : colors.rx);
+    const header = appending ? '' : headerFor(conn, record.timestamp, record.direction, false);
+    const position = appending ? RESTORE_CURSOR : `\x1b[${rows - 1};1H`;
+    const body = `${header}${color}${record.render}${RESET}`;
+    if (record.continues) {
+      // The device hasn't finished this line. Show what it has said so far and remember where the
+      // row ends, so the rest of the line lands on this row rather than a new one.
+      openRow = record.direction;
+      writeEmitter.fire(`${position}${body}${SAVE_CURSOR}`);
+    } else {
+      openRow = undefined;
+      writeEmitter.fire(`${position}${body}\r\n`);
+    }
+    redrawInputLine();
   }
 
-  /** Drops the current connection's event subscriptions without printing anything or touching
-   * input state — shared by `detach` (which adds the banner/state reset) and `attach` (which uses
-   * it to release a previous connection before binding a new one, rather than overwriting the
-   * subscription fields and leaking the old ones). */
-  const unsubscribe = (): void => {
-    trafficSub?.dispose();
-    updateSub?.dispose();
-    connectionCloseSub?.dispose();
-    trafficSub = undefined;
-    updateSub = undefined;
-    connectionCloseSub = undefined;
-  };
+  function headerFor(conn: PortConnection, timestamp: string, direction: 'TX' | 'RX', hex: boolean): string {
+    if (!conn.showTimestamp) {
+      return '';
+    }
+    return `${DIM}${formatTrafficHeader(timestamp, direction, hex, formatSettings.compactTimestamps)}${RESET} `;
+  }
+
+  /** Applies the connection's current Device Console setting, doing the one-time screen surgery
+   * each transition needs. Turning it on releases the scroll region and erases the pinned row so
+   * the device owns the whole screen; turning it off re-establishes both. */
+  function syncDeviceConsole(): void {
+    const want = connected && connection ? connection.deviceConsole : false;
+    if (want === consoleActive) {
+      return;
+    }
+    if (want) {
+      closeOpenRow();
+      consoleActive = true;
+      consoleDecoder = new TextDecoder('utf-8', { fatal: false });
+      // Erase the pinned row before releasing the region, or its text is left stranded on screen
+      // with nothing that will ever redraw over it.
+      writeEmitter.fire(`\x1b[${rows};1H\x1b[2K\x1b[r\x1b[${rows};1H`);
+    } else {
+      consoleActive = false;
+      setScrollRegion();
+      writeEmitter.fire(`${RESET}\r\n`);
+      redrawInputLine();
+    }
+  }
+
+  function subscribeToConnection(conn: PortConnection): void {
+    trafficSub = conn.onDidRecord((record) => {
+      if (consoleActive) {
+        return; // Device Console renders from `onDidRawData` instead; records still drive the log
+      }
+      try {
+        printRecord(conn, record);
+      } catch {
+        // Defensive backstop: a malformed/unexpected record should never leave the terminal in a
+        // corrupted or stuck state (e.g. a partially-written scroll-region escape) — degrade to a
+        // plain marker instead of breaking the whole session's display.
+        openRow = undefined;
+        printAboveInput(`${DIM}[render error]${RESET}\r\n`);
+      }
+    });
+    rawSub = conn.onDidRawData((bytes) => {
+      if (!consoleActive) {
+        return;
+      }
+      // Verbatim: escape sequences, cursor movement and all. A device sending bare LF will
+      // stair-step here exactly as it would under any other raw terminal — translating it would
+      // make this mode something other than raw.
+      writeEmitter.fire(consoleDecoder.decode(bytes, { stream: true }));
+    });
+    updateSub = conn.onDidUpdate(() => {
+      syncDeviceConsole();
+      redrawInputLine();
+    });
+    connectionCloseSub = conn.onDidClose(() => detach());
+  }
 
   const attach = (conn: PortConnection): void => {
     if (connected && connection === conn) {
       return;
     }
-    unsubscribe(); // releases a prior connection's subscriptions if we're rebinding
     connection = conn;
     connected = true;
     line = '';
@@ -304,8 +347,12 @@ export function createSerialTerminal(
     historyIndex = -1;
     escapeBuffer = '';
     insertMode = true;
+    openRow = undefined;
     subscribeToConnection(conn);
-    printAboveInput(`Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`);
+    syncDeviceConsole();
+    if (opened) {
+      printAboveInput(`Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`);
+    }
   };
 
   const detach = (): void => {
@@ -313,13 +360,29 @@ export function createSerialTerminal(
       return;
     }
     connected = false;
-    unsubscribe();
+    trafficSub?.dispose();
+    rawSub?.dispose();
+    updateSub?.dispose();
+    connectionCloseSub?.dispose();
+    trafficSub = undefined;
+    rawSub = undefined;
+    updateSub = undefined;
+    connectionCloseSub = undefined;
     connection = undefined;
     line = '';
     cursorPos = 0;
     historyIndex = -1;
     escapeBuffer = '';
-    printAboveInput('Port disconnected. Reopen to resume.\r\n');
+    openRow = undefined;
+    // The port is gone, so there is nothing left to type at: restore the pinned row unconditionally
+    // rather than leaving the user in a device console with no device behind it.
+    if (consoleActive) {
+      consoleActive = false;
+      setScrollRegion();
+    }
+    if (opened) {
+      printAboveInput('Port disconnected. Reopen to resume.\r\n');
+    }
   };
 
   const pty: vscode.Pseudoterminal = {
@@ -331,24 +394,17 @@ export function createSerialTerminal(
         columns = initialDimensions.columns;
       }
       opened = true;
-      if (pendingOutput.length === 0) {
-        // Genuinely nothing happened before this terminal was first revealed, so state the current
-        // state. If anything *did* happen, `pendingOutput` already opens with the matching banner
-        // (attach's "Connected" or detach's "disconnected") from when it actually happened —
-        // printing a state banner here too would contradict it.
-        pendingOutput = connected
+      // Nothing has been drawn yet, so start from the pinned-row layout and let `syncDeviceConsole`
+      // re-apply Device Console afterwards if the session already had it on — the escapes it fired
+      // at attach time went nowhere, since a pty's writes before `open` are discarded.
+      consoleActive = false;
+      setScrollRegion();
+      printAboveInput(
+        connected
           ? `Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`
-          : `Port ${path} is closed. Open it in the Sessions panel to send/receive.\r\n`;
-      }
-      // One `render` covers the whole replay: each buffered line ends in `\r\n`, and an LF at the
-      // region's bottom margin scrolls it and returns the cursor to the same row.
-      const replay = pendingOutput;
-      pendingOutput = '';
-      render(replay);
-      // VS Code resizes its xterm instance to fit the panel right after this callback, which wipes
-      // the scroll region we just set. `render` re-asserts it on every write, so live traffic
-      // recovers on its own; this settles the geometry for the case where nothing is written next.
-      scheduleResizeSettle();
+          : `Port ${path} is closed. Open it in the Sessions panel to send/receive.\r\n`,
+      );
+      syncDeviceConsole();
     },
     close: () => {
       writeEmitter.fire('\x1b[r');
@@ -357,33 +413,39 @@ export function createSerialTerminal(
       }
     },
     setDimensions: (dimensions) => {
-      // Always record the new geometry first: `inputLineSequence` clips against `columns`, and
-      // writing with stale values is what leaves wrapped remnants behind mid-drag.
-      rows = dimensions.rows;
-      columns = dimensions.columns;
-      if (!opened) {
-        return; // can arrive before `open()`, which will draw with the geometry recorded here
+      if (dimensions.rows === rows && dimensions.columns === columns) {
+        return; // nothing changed that affects the pinned row
       }
-      // Deliberately does NOT erase the *old* absolute input row before redrawing. xterm.js
-      // reflows its buffer as part of the resize, and we're only notified afterwards — so by then
-      // the old row index points at whatever content shifted into it (growing the terminal pulls
-      // scrollback lines back down), and erasing it destroyed a real output line while leaving the
-      // stale prompt untouched somewhere else. That's the duplicated/garbled output seen while
-      // dragging a terminal's edge quickly. Redrawing without erasing can leave a stale prompt
-      // line behind in the scrollback, which is cosmetic; erasing the wrong row loses data.
-      //
-      // Nor does it repaint immediately: mid-drag, VS Code delivers a stream of these while
-      // xterm.js is still reflowing, and every write issued into that is one more chance to land
-      // against geometry that's about to change again. One coalesced repaint after the drag
-      // settles is both quieter and more accurate — and traffic arriving in the meantime still
-      // renders normally, since `render` re-asserts the scroll region itself.
-      scheduleResizeSettle();
+      if (consoleActive) {
+        // No scroll region and no pinned row to reposition — the device owns the screen and will
+        // redraw it however it wants to.
+        rows = dimensions.rows;
+        columns = dimensions.columns;
+        return;
+      }
+      if (dimensions.rows !== rows) {
+        writeEmitter.fire(`\x1b[${rows};1H\x1b[2K`); // clear old input row before it moves
+        rows = dimensions.rows;
+        setScrollRegion();
+      }
+      columns = dimensions.columns;
+      redrawInputLine();
     },
     handleInput: (data: string) => {
       if (!connected || !connection) {
         return; // input is blocked while disconnected
       }
       const activeConnection = connection;
+
+      if (consoleActive) {
+        // Transparent console: every byte goes to the device untouched, which is the whole point —
+        // Ctrl+C interrupts a MicroPython loop, Ctrl+D soft-reboots it, and arrow keys reach the
+        // device's own line editor instead of ours. Enter is the one substitution, since what a
+        // device accepts as "end of line" is the session's configured choice, not whatever byte VS
+        // Code happens to send for the Enter key.
+        void sendKeystrokes(activeConnection, data, printAboveInput);
+        return;
+      }
 
       const recallHistory = (direction: -1 | 1): void => {
         if (history.length === 0) {
@@ -540,11 +602,8 @@ export function createSerialTerminal(
     onDidUserClose: userCloseEmitter.event,
     dispose: () => {
       disposing = true;
-      if (resizeSettleTimer) {
-        clearTimeout(resizeSettleTimer);
-        resizeSettleTimer = undefined;
-      }
       trafficSub?.dispose();
+      rawSub?.dispose();
       updateSub?.dispose();
       connectionCloseSub?.dispose();
       writeEmitter.dispose();
@@ -553,26 +612,6 @@ export function createSerialTerminal(
       terminal.dispose();
     },
   };
-}
-
-/** Renders one TX/RX event for the terminal: colored by direction using the user-configured
- * `colors`, optionally prefixed with the shared header built from the event's own captured
- * timestamp and mode (the same values written to the file log, never recomputed — see
- * `formatTrafficHeader`), rendered compact per the live `formatSettings.compactTimestamps` (read at
- * format time, so a later setting change never retroactively alters an already-printed line).
- * Renders exactly the bytes the event carries — nothing is ever held back from one event to be
- * prepended onto a later one, so this line and the file log's line for the same event always agree. */
-function formatTrafficLine(
-  connection: PortConnection,
-  event: TrafficEvent,
-  colors: TerminalColors,
-  formatSettings: FormatSettings,
-): string {
-  const color = ansiTruecolor(event.direction === 'TX' ? colors.tx : colors.rx);
-  const prefix = connection.showTimestamp
-    ? `${DIM}${formatTrafficHeader(event.timestamp, event.direction, event.hex, formatSettings.compactTimestamps)}${RESET} `
-    : '';
-  return `${prefix}${color}${formatBytesForTerminal(event.bytes, event.hex)}${RESET}\r\n`;
 }
 
 /** Converts a "#rrggbb" hex color into a 24-bit ANSI SGR foreground-color escape sequence.
@@ -589,6 +628,12 @@ function ansiTruecolor(hex: string): string {
   return `\x1b[38;2;${r};${g};${b}m`;
 }
 
+/**
+ * Sends one typed line, appending the session's configured line ending. Without it an embedded
+ * console never sees a completed command — an ESP-IDF console, a Zephyr shell and an AT-command
+ * modem all wait for a terminator before acting on anything. Hex sends never get one: the user
+ * spelled out the exact bytes they wanted on the wire.
+ */
 async function sendLine(
   connection: PortConnection,
   line: string,
@@ -598,9 +643,32 @@ async function sendLine(
     return;
   }
   try {
-    const hex = connection.hexSend;
-    const bytes = hex ? hexStringToBytes(line) : asciiStringToBytes(line);
-    await connection.write(bytes, hex);
+    const bytes = connection.hexSend
+      ? hexStringToBytes(line)
+      : concatBytes(asciiStringToBytes(line), LINE_ENDING_BYTES[connection.lineEnding]);
+    await connection.write(bytes);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    printAboveInput(`${ERROR_COLOR}${message}${RESET}\r\n`);
+  }
+}
+
+/** Device Console keystroke passthrough: the typed bytes go to the device as-is, except that the
+ * Enter key's CR is replaced by the session's configured line ending. */
+async function sendKeystrokes(
+  connection: PortConnection,
+  data: string,
+  printAboveInput: (text: string) => void,
+): Promise<void> {
+  try {
+    const ending = LINE_ENDING_BYTES[connection.lineEnding];
+    let bytes: Uint8Array = new Uint8Array(0);
+    for (const ch of data) {
+      bytes = concatBytes(bytes, ch === ENTER ? ending : asciiStringToBytes(ch));
+    }
+    if (bytes.length > 0) {
+      await connection.write(bytes);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     printAboveInput(`${ERROR_COLOR}${message}${RESET}\r\n`);

@@ -1,0 +1,98 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Serial Log",
+  "scopeName": "text.log.serial",
+  "comment": "Highlights the annotated log files this extension records. Every rule is anchored to the exact '[<timestamp> <MODE> <DIRECTION> <LEVEL>]' header the extension writes, so the same repository can be injected into plain *.log files (see serial-log-injection.tmLanguage.json) without touching unrelated logs. The header is the only thing this extension adds to a line: everything after the closing bracket is the device's own bytes, and is handed to the built-in 'log' grammar to colour like any other log text.",
+  "patterns": [
+    { "include": "#session-banner" },
+    { "include": "#hex-line" },
+    { "include": "#ascii-line" },
+    { "include": "text.log" }
+  ],
+  "repository": {
+    "session-banner": {
+      "comment": "'# --- COM8 recording started 2026-09-05T14:23:01.123+08:00 · 115200 8N1 ---', written when the file is created and when recording stops. Matched by its exact bookended shape rather than a bare leading '#', so injecting this rule into unrelated *.log files can't dim a line that merely starts with a hash.",
+      "match": "^# --- .* ---$",
+      "name": "comment.line.number-sign.log.serial"
+    },
+    "hex-line": {
+      "comment": "Claims the whole line so the payload is scoped as hex bytes rather than being reinterpreted as prose by the built-in grammar.",
+      "begin": "^(\\[)((?:\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}(?:[+-]\\d{2}:\\d{2}|Z)|\\d{2}[/-]\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}|\\d{2}:\\d{2}:\\d{2}\\.\\d{3}))\\s+(HEX)\\s+(TX|RX)(?:\\s+(ERROR|WARN|INFO|DEBUG|TRACE))?\\s*(\\])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.bracket.log.serial" },
+        "2": { "name": "comment log.date.serial" },
+        "3": { "name": "storage.type.mode.log.serial" },
+        "4": { "patterns": [{ "include": "#direction" }] },
+        "5": { "patterns": [{ "include": "#severity" }] },
+        "6": { "name": "punctuation.definition.bracket.log.serial" }
+      },
+      "end": "$",
+      "patterns": [{ "include": "#hex-bytes" }]
+    },
+    "ascii-line": {
+      "comment": "Scopes the header, then hands the payload to the serial-specific payload rules and finally to the built-in 'log' grammar, which already colours quoted strings, stack frames, dates and numeric constants. The severity group is optional so a log recorded before the level moved into the header still matches. Both timestamp forms the extension has ever written, and both mode spellings ('ASC' now, 'ASCII' in earlier versions), are accepted: reading is where backwards compatibility is cheap, so a log recorded last month still lights up.",
+      "begin": "^(\\[)((?:\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}(?:[+-]\\d{2}:\\d{2}|Z)|\\d{2}[/-]\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}|\\d{2}:\\d{2}:\\d{2}\\.\\d{3}))\\s+(ASCII|ASC)\\s+(TX|RX)(?:\\s+(ERROR|WARN|INFO|DEBUG|TRACE))?\\s*(\\])",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.bracket.log.serial" },
+        "2": { "name": "comment log.date.serial" },
+        "3": { "name": "storage.type.mode.log.serial" },
+        "4": { "patterns": [{ "include": "#direction" }] },
+        "5": { "patterns": [{ "include": "#severity" }] },
+        "6": { "name": "punctuation.definition.bracket.log.serial" }
+      },
+      "end": "$",
+      "patterns": [
+        { "include": "#esp-idf-prefix" },
+        { "include": "#zephyr-prefix" },
+        { "include": "text.log" }
+      ]
+    },
+    "direction": {
+      "comment": "TX and RX get different scopes rather than one shared one — telling at a glance which side of the wire a line came from is the main thing a serial log is read for.",
+      "patterns": [
+        { "match": "RX", "name": "support.class.direction.rx.log.serial" },
+        { "match": "TX", "name": "keyword.control.direction.tx.log.serial" }
+      ]
+    },
+    "severity": {
+      "comment": "The level this extension detected for a received line, written into the header's fixed-width level column. Scoped under 'log.<level>' so the naming lines up with VS Code's built-in log grammar, with a '.serial' suffix so these can be recoloured without affecting ordinary log files. No default theme actually styles 'log.*', so the extension ships colours for these five scopes via configurationDefaults in package.json.",
+      "patterns": [
+        { "match": "ERROR", "name": "log.error.serial" },
+        { "match": "WARN", "name": "log.warning.serial" },
+        { "match": "INFO", "name": "log.info.serial" },
+        { "match": "DEBUG", "name": "log.debug.serial" },
+        { "match": "TRACE", "name": "log.verbose.serial" }
+      ]
+    },
+    "hex-bytes": {
+      "match": "\\b[0-9A-F]{2}\\b",
+      "name": "constant.numeric.hex.log.serial"
+    },
+    "esp-idf-prefix": {
+      "comment": "ESP-IDF's own log prefix, e.g. 'I (1234) wifi: connected' — the number is the millisecond uptime, the word before the colon is the component tag.",
+      "match": "\\b([EWIDV]) (\\()(\\d+)(\\))(?: \\d+)? ([^\\s:]+)(:)",
+      "captures": {
+        "1": { "name": "keyword.other.level.log.serial" },
+        "2": { "name": "punctuation.definition.bracket.log.serial" },
+        "3": { "name": "constant.numeric.uptime.log.serial" },
+        "4": { "name": "punctuation.definition.bracket.log.serial" },
+        "5": { "name": "entity.name.tag.log.serial" },
+        "6": { "name": "punctuation.separator.log.serial" }
+      }
+    },
+    "zephyr-prefix": {
+      "comment": "Zephyr's log prefix, e.g. '[00:00:01.234,000] <err> net_if: down'.",
+      "match": "(\\[)(\\d{2}:\\d{2}:\\d{2}\\.\\d{3},\\d{3})(\\]) (<)(err|wrn|inf|dbg)(>) ([^\\s:]+)(:)",
+      "captures": {
+        "1": { "name": "punctuation.definition.bracket.log.serial" },
+        "2": { "name": "comment log.date.serial" },
+        "3": { "name": "punctuation.definition.bracket.log.serial" },
+        "4": { "name": "punctuation.definition.bracket.log.serial" },
+        "5": { "name": "keyword.other.level.log.serial" },
+        "6": { "name": "punctuation.definition.bracket.log.serial" },
+        "7": { "name": "entity.name.tag.log.serial" },
+        "8": { "name": "punctuation.separator.log.serial" }
+      }
+    }
+  }
+}

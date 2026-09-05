@@ -2,6 +2,7 @@
 .vscode-test/**
 src/**
 out/**
+samples/**
 node_modules/**
 !node_modules/serialport
 !node_modules/serialport/**
