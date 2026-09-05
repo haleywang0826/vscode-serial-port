@@ -174,9 +174,14 @@ export function createSerialTerminal(
     writeEmitter.fire(`\x1b[${rows};1H\x1b[2K${prompt}${clipped}\x1b[${rows};${cursorCol}H${cursorStyle}`);
   };
 
-  /** Writes text (must end `\r\n`) into the scroll region, then restores the pinned input line. */
+  /** Writes text (must end `\r\n`) into the scroll region, then restores the pinned input line.
+   * Erases the row before writing it (`\x1b[2K`, the same defensive clear `redrawInputLine` and
+   * `setDimensions` already apply to their own rows) so a shorter new line can never leave a
+   * longer previous line's trailing characters dangling on screen — e.g. a stale hex-formatted
+   * tail surviving past a shorter ASCII-decoded line, previously observed when this row's content
+   * didn't get fully overwritten by the next write. */
   const printAboveInput = (text: string): void => {
-    writeEmitter.fire(`\x1b[${rows - 1};1H${text}`);
+    writeEmitter.fire(`\x1b[${rows - 1};1H\x1b[2K${text}`);
     redrawInputLine();
   };
 
