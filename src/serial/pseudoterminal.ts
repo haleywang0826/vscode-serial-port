@@ -23,6 +23,15 @@ const DEFAULT_COLUMNS = 80;
 /** Cap on recalled input lines (Up/Down history) — a generous bound for interactive serial
  * debugging without letting the array grow unbounded over a long session. */
 const HISTORY_LIMIT = 100;
+/** Cap on output buffered while the pty is not yet open (see `pendingOutput`). Generous enough to
+ * hold a long pre-reveal session, bounded so a terminal that is never revealed can't grow forever;
+ * trimming always drops whole lines off the front, never splitting an escape sequence. */
+const PENDING_OUTPUT_MAX_CHARS = 64 * 1024;
+/** Quiet period after the last `setDimensions` call before the terminal repaints itself once more
+ * (see `scheduleResizeSettle`). Long enough to coalesce a drag's worth of resize events and let
+ * xterm.js finish reflowing, short enough that the corrected frame lands while the user is still
+ * looking at the result of their drag. */
+const RESIZE_SETTLE_MS = 80;
 /** DECSCUSR cursor-shape escapes (`CSI Ps SP q`, supported by VS Code's xterm.js-based terminal
  * renderer): a thin steady bar for insert mode (matches the vim/readline convention that a bar
  * cursor means "typing inserts"), a steady block for overwrite mode (typing replaces the character
@@ -169,6 +178,16 @@ export function createSerialTerminal(
   let connection: PortConnection | undefined;
   let connected = false;
   let opened = false;
+  /** Traffic/banner text produced before VS Code has called `pty.open()`, replayed in order once it
+   * does. VS Code only subscribes to `onDidWrite` at open time, and only calls `open()` when the
+   * terminal is first actually rendered — so anything fired into `writeEmitter` before then is
+   * silently discarded. A session whose port is opened (and starts sending/receiving) while its
+   * terminal has never been revealed would therefore lose that traffic from the terminal entirely,
+   * even though the file log — reading the very same `TrafficEvent`s — recorded all of it. That
+   * mismatch is what "the log file is correct, but the terminal is not" was. Only the raw text is
+   * buffered, never the cursor-positioning escapes around it: `rows` isn't known until `open()`
+   * either, so the positioning has to be computed at replay time, not at print time. */
+  let pendingOutput = '';
   /** Set before we call `terminal.dispose()` ourselves, so the resulting `pty.close()` callback
    * (VS Code calls it either way) can tell "I disposed this" apart from a real user terminal-kill
    * and skip firing `onDidUserClose` for the former. */
@@ -214,6 +233,16 @@ export function createSerialTerminal(
 
   /** Writes text (must end `\r\n`) into the scroll region, then restores the pinned input line. */
   const printAboveInput = (text: string): void => {
+    if (!opened) {
+      pendingOutput += text;
+      if (pendingOutput.length > PENDING_OUTPUT_MAX_CHARS) {
+        // Drop whole lines off the front, never a partial one — slicing mid-escape-sequence would
+        // replay a truncated escape and corrupt the display.
+        const cut = pendingOutput.indexOf('\n', pendingOutput.length - PENDING_OUTPUT_MAX_CHARS);
+        pendingOutput = cut === -1 ? '' : pendingOutput.slice(cut + 1);
+      }
+      return; // `rows`/`columns` aren't known yet; `open()` draws everything once they are
+    }
     closeOpenRow();
     writeEmitter.fire(`\x1b[${rows - 1};1H${text}`);
     redrawInputLine();
@@ -397,16 +426,21 @@ export function createSerialTerminal(
         columns = initialDimensions.columns;
       }
       opened = true;
-      // Nothing has been drawn yet, so start from the pinned-row layout and let `syncDeviceConsole`
-      // re-apply Device Console afterwards if the session already had it on — the escapes it fired
-      // at attach time went nowhere, since a pty's writes before `open` are discarded.
-      consoleActive = false;
-      setScrollRegion();
-      printAboveInput(
-        connected
+      if (pendingOutput.length === 0) {
+        // Genuinely nothing happened before this terminal was first revealed, so state the current
+        // state. If anything *did* happen, `pendingOutput` already opens with the matching banner
+        // (attach's "Connected" or detach's "disconnected") from when it actually happened —
+        // printing a state banner here too would contradict it.
+        pendingOutput = connected
           ? `Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`
-          : `Port ${path} is closed. Open it in the Sessions panel to send/receive.\r\n`,
-      );
+          : `Port ${path} is closed. Open it in the Sessions panel to send/receive.\r\n`;
+      }
+      // Replay all buffered output as one write with scroll region re-asserted
+      const replay = pendingOutput;
+      pendingOutput = '';
+      consoleActive = false;
+      writeEmitter.fire(`${scrollRegionSequence()}${replay}`);
+      redrawInputLine();
       syncDeviceConsole();
     },
     close: () => {
