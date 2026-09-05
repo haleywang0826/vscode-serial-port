@@ -107,12 +107,12 @@ export class PortConnection {
   private logDirReady: Promise<void> = Promise.resolve();
   private controlLineChain: Promise<void> = Promise.resolve();
   /** Plain-text buffer of every already-formatted line this connection instance has produced so
-   * far (content only — no timestamp/direction/mode header), capped to `HISTORY_MAX_CHARS`.
-   * Populated unconditionally (not just while recording) so turning "Record to File" on mid-session
-   * can back-fill the log with everything already shown — see `setRecording`. Backfilled lines
-   * deliberately carry no header: we don't know (and the user doesn't want us guessing) what
-   * header, if any, applied when each line originally appeared, so only live-recorded lines going
-   * forward get one. Scoped to this connection *instance*, so a fresh reopen naturally starts with
+   * far, capped to `HISTORY_MAX_CHARS`. Populated unconditionally (not just while recording) so
+   * turning "Record to File" on mid-session can back-fill the log with everything already shown —
+   * see `setRecording`. Each line carries the same header a live-recorded line would (via
+   * `formatTrafficHeader`) whenever `showTimestamp` was on at the moment that event happened —
+   * matching what the terminal actually displayed then — and is bare content otherwise; see
+   * `appendHistory`. Scoped to this connection *instance*, so a fresh reopen naturally starts with
    * an empty buffer and a later RF enable only ever backfills that reopen's own traffic, never a
    * prior open's. */
   private historyText = '';
@@ -172,7 +172,12 @@ export class PortConnection {
     });
   }
 
-  write(bytes: Uint8Array): Promise<void> {
+  /** `hex` is the format the caller actually built `bytes` in — e.g. a Send Template sends in its
+   * own saved format regardless of the session's live hex-send toggle — so this must never fall
+   * back to reading `this.hexSend` itself; doing so previously caused a hex-format template sent
+   * while the session was in ASCII mode to be recorded/displayed as ASCII even though the bytes on
+   * the wire were correct. */
+  write(bytes: Uint8Array, hex: boolean): Promise<void> {
     return new Promise((resolve, reject) => {
       this.port.write(Buffer.from(bytes), (err) => {
         if (err) {
@@ -180,11 +185,10 @@ export class PortConnection {
           return;
         }
         const timestamp = toLocalIsoString(new Date());
-        const hex = this.hexSend;
         this.stats.bytesSent += bytes.length;
         const event: TrafficEvent = { direction: 'TX', bytes, timestamp, hex };
         this.appendLog(event);
-        this.appendHistory(bytes, hex);
+        this.appendHistory(event);
         this.onDidTrafficEmitter.fire(event);
         this.onDidUpdateEmitter.fire();
         resolve();
@@ -224,9 +228,9 @@ export class PortConnection {
    * fragmenting into a new one each time. Omitting it (the default — used when the user flips the
    * checkbox on live, whether the port is open or not) starts a fresh file and backfills it with
    * this connection instance's own `historyText` so far, covering the whole communication period
-   * already shown — pasted in verbatim, with no timestamp header, since we don't know (and were
-   * asked not to guess) what header, if any, applied when each backfilled line originally
-   * appeared; only lines recorded from this point on get one. Since `historyText` is scoped to
+   * already shown — each backfilled line carries the same timestamp header a live-recorded line
+   * would if "Show timestamp" was on when that line originally appeared (see `appendHistory`), and
+   * is bare content otherwise. Since `historyText` is scoped to
    * this connection instance, a reopened connection's empty buffer means turning RF on after a
    * reopen only ever backfills that reopen's own traffic.
    *
@@ -382,14 +386,20 @@ export class PortConnection {
   /** Turns the accumulated `rxBuffer` into one `TrafficEvent`. Normally holds back a trailing
    * incomplete UTF-8 sequence (see `splitTrailingIncompleteUtf8`) until it's complete; `force`
    * (used on dispose/port-close) flushes everything immediately instead, so buffered trailing
-   * bytes are never silently dropped when the connection is going away. */
+   * bytes are never silently dropped when the connection is going away. The UTF-8 holdback is
+   * skipped entirely in hex-receive mode — hex has no multi-byte-character concept (see
+   * `format.ts`), so applying it there only ever misidentifies an ordinary trailing byte as an
+   * incomplete lead byte and holds it back into the next flush, which is what previously made a
+   * hex receive look like it shed a byte onto the following message (e.g. "00 11" then "20 00 11"
+   * instead of "00 11 20" in one piece). */
   private flushRxBuffer(force = false): void {
     if (this.rxBuffer.length === 0) {
       return;
     }
-    const { complete, pending } = force
-      ? { complete: this.rxBuffer, pending: new Uint8Array(0) }
-      : splitTrailingIncompleteUtf8(this.rxBuffer);
+    const { complete, pending } =
+      force || this.hexRecv
+        ? { complete: this.rxBuffer, pending: new Uint8Array(0) }
+        : splitTrailingIncompleteUtf8(this.rxBuffer);
     this.rxBuffer = pending;
     if (complete.length === 0) {
       return;
@@ -398,7 +408,7 @@ export class PortConnection {
     const hex = this.hexRecv;
     const event: TrafficEvent = { direction: 'RX', bytes: complete, timestamp, hex };
     this.appendLog(event);
-    this.appendHistory(complete, hex);
+    this.appendHistory(event);
     this.onDidTrafficEmitter.fire(event);
     this.onDidUpdateEmitter.fire();
   }
@@ -411,8 +421,8 @@ export class PortConnection {
   }
 
   /** Formats and appends one live event to the log buffer with its full header — used only by
-   * `appendLog`. Backfilled history lines skip this entirely (see `setRecording`), since they
-   * carry no header. */
+   * `appendLog`. Backfilled history lines go through `appendHistory` instead, which mirrors this
+   * header construction but gates it on `showTimestamp` at the time each event happened. */
   private writeLogLine(direction: 'TX' | 'RX', bytes: Uint8Array, timestamp: string, hex: boolean): void {
     const formatted = formatBytes(bytes, hex);
     const line = `${formatTrafficHeader(timestamp, direction, hex, this.formatSettings.compactTimestamps)} ${formatted}`;
@@ -422,12 +432,20 @@ export class PortConnection {
     }
   }
 
-  /** Appends `formatBytes(bytes, hex)` (content only, no header) to the bounded plain-text
-   * `historyText` buffer, regardless of whether recording is currently on, so a later "Record to
-   * File" enable can backfill it. Trims whole leading lines (never a mid-line cut) once the cap is
-   * exceeded, so backfilled content always starts at a line boundary. */
-  private appendHistory(bytes: Uint8Array, hex: boolean): void {
-    this.historyText += formatBytes(bytes, hex) + '\n';
+  /** Appends one event's formatted line to the bounded plain-text `historyText` buffer, regardless
+   * of whether recording is currently on, so a later "Record to File" enable can backfill it. The
+   * line carries the same `formatTrafficHeader(...)` header `writeLogLine` writes for a live-recorded
+   * line, but only when `this.showTimestamp` was on at the moment the event happened — matching what
+   * the terminal was actually displaying at that instant, since the terminal's own header is gated
+   * on that same checkbox. A header-less line (the case when "Show timestamp" was off) still gets
+   * backfilled as bare content, same as before. Trims whole leading lines (never a mid-line cut)
+   * once the cap is exceeded, so backfilled content always starts at a line boundary. */
+  private appendHistory(event: TrafficEvent): void {
+    const formatted = formatBytes(event.bytes, event.hex);
+    const line = this.showTimestamp
+      ? `${formatTrafficHeader(event.timestamp, event.direction, event.hex, this.formatSettings.compactTimestamps)} ${formatted}`
+      : formatted;
+    this.historyText += line + '\n';
     while (this.historyText.length > HISTORY_MAX_CHARS) {
       const newlineIndex = this.historyText.indexOf('\n');
       if (newlineIndex === -1) {

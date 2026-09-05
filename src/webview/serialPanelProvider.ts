@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { SerialPort } from 'serialport';
 import { ConnectionManager, DEFAULT_PORT_CONFIG, FormatSettings, PortConfig } from '../serial/connectionManager';
-import { asciiStringToBytes, hexStringToBytes } from '../serial/format';
+import { asciiStringToBytes, hexStringToBytes, normalizeHexString } from '../serial/format';
 import { createSerialTerminal, SerialTerminal, TerminalColors } from '../serial/pseudoterminal';
 import { SendFormat, TemplateStore } from '../templates/templateStore';
 
@@ -357,7 +357,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         break;
       case 'addTemplate':
         void this.templates
-          .add({ name: message.name, format: message.format, data: message.data })
+          .add({ name: message.name, format: message.format, data: normalizeTemplateData(message.format, message.data) })
           .then(
             () => this.postState(),
             (err) => vscode.window.showErrorMessage(`Failed to save template: ${errorMessage(err)}`),
@@ -365,7 +365,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
         break;
       case 'updateTemplate':
         void this.templates
-          .update(message.id, { name: message.name, format: message.format, data: message.data })
+          .update(message.id, { name: message.name, format: message.format, data: normalizeTemplateData(message.format, message.data) })
           .then(
             () => this.postState(),
             (err) => vscode.window.showErrorMessage(`Failed to save template: ${errorMessage(err)}`),
@@ -709,8 +709,9 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       return;
     }
     try {
-      const bytes = template.format === 'hex' ? hexStringToBytes(template.data) : asciiStringToBytes(template.data);
-      await connection.write(bytes);
+      const hex = template.format === 'hex';
+      const bytes = hex ? hexStringToBytes(template.data) : asciiStringToBytes(template.data);
+      await connection.write(bytes, hex);
     } catch (err) {
       vscode.window.showErrorMessage(`Failed to send template: ${errorMessage(err)}`);
     }
@@ -825,6 +826,15 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Normalizes a Send Template's data before it's persisted: a hex-format template's text is
+ * round-tripped through `normalizeHexString` (padding an odd trailing digit with a 0, the same
+ * convention `hexStringToBytes` already applies at send time — see there) so the *saved* text is
+ * always valid, even-length hex, not just the bytes actually transmitted. An ASCII-format
+ * template's data passes through unchanged; hex normalization has no meaning for it. */
+function normalizeTemplateData(format: SendFormat, data: string): string {
+  return format === 'hex' ? normalizeHexString(data) : data;
 }
 
 function getNonce(): string {

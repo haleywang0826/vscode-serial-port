@@ -255,6 +255,19 @@ export function hexStringToBytes(input: string): Uint8Array {
   return bytes;
 }
 
+/** Normalizes a hex-mode string to canonical, even-length "AA BB CC" form — round-tripped through
+ * `hexStringToBytes`/`bytesToHex`, so it picks up the same trailing-zero padding for an odd digit
+ * count. Used to fix up a Send Template's hex data at save time, so an odd-length value (e.g. "00
+ * 11 2") is stored already-padded ("00 11 20") instead of only ever getting padded transiently at
+ * send time — the saved template text itself then always reads as valid, even-length hex. Returns
+ * '' for an empty/all-whitespace input rather than throwing. */
+export function normalizeHexString(input: string): string {
+  if (input.trim().length === 0) {
+    return '';
+  }
+  return bytesToHex(hexStringToBytes(input));
+}
+
 /** True if `ch` is a hex digit — the only character hex-mode input should accept while typing.
  * Spaces between byte pairs are auto-inserted (see `appendHexInputChar`), so a typed space is
  * simply ignored rather than accepted verbatim. */

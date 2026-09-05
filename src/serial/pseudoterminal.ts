@@ -501,8 +501,9 @@ async function sendLine(
     return;
   }
   try {
-    const bytes = connection.hexSend ? hexStringToBytes(line) : asciiStringToBytes(line);
-    await connection.write(bytes);
+    const hex = connection.hexSend;
+    const bytes = hex ? hexStringToBytes(line) : asciiStringToBytes(line);
+    await connection.write(bytes, hex);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     printAboveInput(`${ERROR_COLOR}${message}${RESET}\r\n`);
