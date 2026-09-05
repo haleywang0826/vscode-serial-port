@@ -303,7 +303,6 @@ export function createSerialTerminal(
       writeEmitter.fire(`\x1b[${rows};1H\x1b[2K\x1b[r\x1b[${rows};1H`);
     } else {
       consoleActive = false;
-      setScrollRegion();
       writeEmitter.fire(`${RESET}\r\n`);
       redrawInputLine();
     }
