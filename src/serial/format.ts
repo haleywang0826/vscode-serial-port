@@ -192,42 +192,6 @@ export function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   return out;
 }
 
-/** Number of bytes a UTF-8 lead byte declares its sequence will occupy (1-4), or 0 if `byte` is not
- * a valid lead byte (e.g. it's a continuation byte, 0x80-0xBF, or one of the invalid 0xF8-0xFF). */
-function utf8SequenceLength(byte: number): number {
-  if (byte < 0x80) return 1;
-  if ((byte & 0xe0) === 0xc0) return 2;
-  if ((byte & 0xf0) === 0xe0) return 3;
-  if ((byte & 0xf8) === 0xf0) return 4;
-  return 0;
-}
-
-/**
- * Scans the tail of `data` (up to the last 4 bytes, the longest possible UTF-8 sequence) for a
- * lead byte whose declared sequence length extends past the end of the buffer, and splits it off
- * as `pending`. This is what lets a multi-byte UTF-8 character (e.g. any Chinese character) render
- * correctly even when the underlying `serialport` `'data'` event splits it mid-character: the
- * caller holds `pending` back and prepends it to the next chunk before decoding again, instead of
- * feeding each half to the UTF-8 decoder independently (which would render each half as U+FFFD).
- */
-export function splitTrailingIncompleteUtf8(data: Uint8Array): { complete: Uint8Array; pending: Uint8Array } {
-  const searchFrom = Math.max(0, data.length - 4);
-  for (let start = data.length - 1; start >= searchFrom; start--) {
-    const byte = data[start];
-    if ((byte & 0xc0) === 0x80) {
-      continue; // continuation byte; keep scanning back toward its lead byte
-    }
-    const len = utf8SequenceLength(byte);
-    if (len === 0) {
-      return { complete: data, pending: new Uint8Array(0) }; // not a UTF-8 lead byte; nothing to carry
-    }
-    if (start + len > data.length) {
-      return { complete: data.slice(0, start), pending: data.slice(start) }; // sequence cut off at the end
-    }
-    return { complete: data, pending: new Uint8Array(0) }; // sequence already complete within this chunk
-  }
-  return { complete: data, pending: new Uint8Array(0) };
-}
 
 /**
  * Parses a hex-mode send line ("0A FF 3C" or "0AFF3C") into bytes. An odd number of digits is

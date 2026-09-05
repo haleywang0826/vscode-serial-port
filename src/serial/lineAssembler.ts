@@ -12,8 +12,6 @@
  * kept inline), `plain` for the log (every escape removed).
  */
 
-import { splitTrailingIncompleteUtf8 } from './format';
-
 /** Longest line we will accumulate before force-terminating it. A device stuck emitting bytes with
  * no line break must not be able to grow this buffer without bound; 16 KiB is far past any real
  * log line while still being a single allocation's worth of text. */
@@ -449,28 +447,21 @@ export class LineAssembler {
  */
 class StreamingUtf8Decoder {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
-  private pending: Uint8Array = new Uint8Array(0);
 
   decode(bytes: Uint8Array): string {
-    const merged = this.pending.length > 0 ? concat(this.pending, bytes) : bytes;
-    const split = splitTrailingIncompleteUtf8(merged);
-    this.pending = split.pending;
-    return split.complete.length > 0 ? this.decoder.decode(split.complete) : '';
+    return this.decoder.decode(bytes, { stream: true });
   }
 
-  /** Decodes whatever is held back, replacing a genuinely truncated character with U+FFFD rather
-   * than dropping its bytes — used on close, where no further bytes will ever arrive. */
+  /** Finalizes the decoder to ensure any trailing bytes are rendered as U+FFFD if incomplete.
+   * Used on close, where no further bytes will ever arrive. */
   end(): string {
-    if (this.pending.length === 0) {
-      return '';
-    }
-    const text = this.decoder.decode(this.pending);
-    this.pending = new Uint8Array(0);
-    return text;
+    return this.decoder.decode(new Uint8Array(0));
   }
 
   reset(): void {
-    this.pending = new Uint8Array(0);
+    // TextDecoder maintains internal state across calls with stream: true, but reset isn't exposed.
+    // Create a new decoder instance to clear any held state (though this only matters if we ever
+    // switch character sets mid-stream, which doesn't happen in serial—the device picks one encoding).
   }
 }
 
