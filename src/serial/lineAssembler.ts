@@ -449,7 +449,11 @@ class StreamingUtf8Decoder {
   private readonly decoder = new TextDecoder('utf-8', { fatal: false });
 
   decode(bytes: Uint8Array): string {
-    return this.decoder.decode(bytes, { stream: true });
+    // Do NOT use stream: true — that causes TextDecoder to hold back trailing bytes that look
+    // like incomplete UTF-8 lead bytes (0xC0-0xFF), then prepend them to the next message.
+    // By the time the assembler calls decode() on a complete line, all bytes for that line
+    // have arrived; any incomplete sequences should render as U+FFFD inline, not be held back.
+    return this.decoder.decode(bytes);
   }
 
   /** Finalizes the decoder to ensure any trailing bytes are rendered as U+FFFD if incomplete.
@@ -459,9 +463,9 @@ class StreamingUtf8Decoder {
   }
 
   reset(): void {
-    // TextDecoder maintains internal state across calls with stream: true, but reset isn't exposed.
-    // Create a new decoder instance to clear any held state (though this only matters if we ever
-    // switch character sets mid-stream, which doesn't happen in serial—the device picks one encoding).
+    // TextDecoder maintains internal state, but reset isn't exposed in the standard API.
+    // We'd need to create a new instance to truly reset, but in serial communication
+    // the device picks one encoding and sticks with it, so this is not needed in practice.
   }
 }
 
