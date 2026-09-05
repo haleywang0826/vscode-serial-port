@@ -25,6 +25,11 @@ const HISTORY_LIMIT = 100;
  * hold a long pre-reveal session, bounded so a terminal that is never revealed can't grow forever;
  * trimming always drops whole lines off the front, never splitting an escape sequence. */
 const PENDING_OUTPUT_MAX_CHARS = 64 * 1024;
+/** Quiet period after the last `setDimensions` call before the terminal repaints itself once more
+ * (see `scheduleResizeSettle`). Long enough to coalesce a drag's worth of resize events and let
+ * xterm.js finish reflowing, short enough that the corrected frame lands while the user is still
+ * looking at the result of their drag. */
+const RESIZE_SETTLE_MS = 80;
 /** DECSCUSR cursor-shape escapes (`CSI Ps SP q`, supported by VS Code's xterm.js-based terminal
  * renderer): a thin steady bar for insert mode (matches the vim/readline convention that a bar
  * cursor means "typing inserts"), a steady block for overwrite mode (typing replaces the character
@@ -158,27 +163,42 @@ export function createSerialTerminal(
    * and skip firing `onDidUserClose` for the former. */
   let disposing = false;
 
+  /** Pending trailing repaint after a resize burst — see `scheduleResizeSettle`. */
+  let resizeSettleTimer: ReturnType<typeof setTimeout> | undefined;
+
   let trafficSub: vscode.Disposable | undefined;
   let updateSub: vscode.Disposable | undefined;
   let connectionCloseSub: vscode.Disposable | undefined;
 
-  const setScrollRegion = (): void => {
-    writeEmitter.fire(`\x1b[1;${rows - 1}r`);
-  };
+  /**
+   * The DECSTBM sequence confining scrolling to rows 1..rows-1, so the last row can hold the
+   * pinned input line. Re-emitted as part of *every* write (see `render`) instead of once at
+   * `open()`/resize time: xterm.js resets the scroll margins to the full screen whenever its
+   * buffer is resized, including the internal resize VS Code performs right after calling
+   * `open()` — before which we've already sent our region. A lost region is invisible until
+   * output stops scrolling: `printAboveInput` writes at row `rows - 1` expecting that to be the
+   * region's bottom margin (so the trailing newline scrolls it), but with the margins reset to
+   * the real screen height that row is mid-screen, the newline just moves the cursor down instead
+   * of scrolling, and the next write jumps back and overwrites the same row — the terminal shows
+   * only the newest line no matter how much traffic arrives, while the file log (reading the same
+   * events) is complete. Resizing the window "fixed" it purely because that was the one path that
+   * re-sent the region. Re-asserting it costs a handful of bytes per write and makes the display
+   * self-healing against anything that clears the margins, rather than depending on us catching
+   * every event that could.
+   */
+  const scrollRegionSequence = (): string => (rows > 1 ? `\x1b[1;${rows - 1}r` : '');
 
-  /** Redraws the pinned input row: prompt + the input line clipped to a horizontally-scrolling
-   * window that always keeps the cursor visible and never exceeds the terminal's actual width.
-   * This clipping is what prevents the input line from ever wrapping onto a second physical row —
-   * previously, a line long enough to overflow the terminal's width (with no `columns` tracking at
-   * all) would wrap, and the redraw/erase logic only ever touched the single pinned row, leaving
-   * stale wrapped characters behind and corrupting the display on the next redraw. The window
-   * (`offset`) is recomputed fresh from `cursorPos` on every call rather than persisted, so moving
-   * the cursor in either direction naturally scrolls the window to follow it. Also positions the
-   * real terminal cursor at its on-screen column and sets its DECSCUSR shape per `insertMode`. */
-  const redrawInputLine = (): void => {
-    if (!opened) {
-      return; // `rows`/`columns` aren't known yet; `open()` draws the input line once it is
-    }
+  /** Builds (but does not emit) the pinned input row: prompt + the input line clipped to a
+   * horizontally-scrolling window that always keeps the cursor visible and never exceeds the
+   * terminal's actual width. This clipping is what prevents the input line from ever wrapping onto
+   * a second physical row — previously, a line long enough to overflow the terminal's width (with
+   * no `columns` tracking at all) would wrap, and the redraw/erase logic only ever touched the
+   * single pinned row, leaving stale wrapped characters behind and corrupting the display on the
+   * next redraw. The window (`offset`) is recomputed fresh from `cursorPos` on every call rather
+   * than persisted, so moving the cursor in either direction naturally scrolls the window to follow
+   * it. Also positions the real terminal cursor at its on-screen column and sets its DECSCUSR shape
+   * per `insertMode`. */
+  const inputLineSequence = (): string => {
     const prompt = promptFor();
     const displayLine = connected ? line : '';
     const displayCursorPos = connected ? cursorPos : 0;
@@ -187,31 +207,54 @@ export function createSerialTerminal(
     const clipped = displayLine.slice(offset, offset + available);
     const cursorCol = prompt.length + (displayCursorPos - offset) + 1;
     const cursorStyle = insertMode ? CURSOR_STYLE_INSERT : CURSOR_STYLE_OVERWRITE;
-    writeEmitter.fire(`\x1b[${rows};1H\x1b[2K${prompt}${clipped}\x1b[${rows};${cursorCol}H${cursorStyle}`);
+    return `\x1b[${rows};1H\x1b[2K${prompt}${clipped}\x1b[${rows};${cursorCol}H${cursorStyle}`;
   };
 
-  /** Writes text (must end `\r\n`) into the scroll region, then restores the pinned input line.
-   * Erases the row before writing it (`\x1b[2K`, the same defensive clear `redrawInputLine` and
-   * `setDimensions` already apply to their own rows) so a shorter new line can never leave a
-   * longer previous line's trailing characters dangling on screen — e.g. a stale hex-formatted
-   * tail surviving past a shorter ASCII-decoded line, previously observed when this row's content
-   * didn't get fully overwritten by the next write.
-   *
-   * Before the pty is open, the text is buffered instead (see `pendingOutput`) rather than fired
-   * into a `writeEmitter` nobody is listening to yet. */
-  const printAboveInput = (text: string): void => {
+  /** The single write path for everything this terminal displays: re-asserts the scroll region,
+   * optionally prints `text` (which must end in `\r\n`) into it at the region's bottom margin, and
+   * redraws the pinned input row — all as ONE `writeEmitter.fire()`, so no other write can ever
+   * land between the parts and leave the display half-updated. The output row is erased
+   * (`\x1b[2K`) before it's written, so a shorter new line can never leave a longer previous
+   * line's trailing characters dangling on screen. Before the pty is open, `text` is buffered
+   * instead (see `pendingOutput`) rather than fired into a `writeEmitter` nobody is listening to
+   * yet. */
+  const render = (text?: string): void => {
     if (!opened) {
-      pendingOutput += text;
-      if (pendingOutput.length > PENDING_OUTPUT_MAX_CHARS) {
-        // Drop whole lines off the front, never a partial one — slicing mid-escape-sequence would
-        // replay a truncated escape and corrupt the display.
-        const cut = pendingOutput.indexOf('\n', pendingOutput.length - PENDING_OUTPUT_MAX_CHARS);
-        pendingOutput = cut === -1 ? '' : pendingOutput.slice(cut + 1);
+      if (text) {
+        pendingOutput += text;
+        if (pendingOutput.length > PENDING_OUTPUT_MAX_CHARS) {
+          // Drop whole lines off the front, never a partial one — slicing mid-escape-sequence would
+          // replay a truncated escape and corrupt the display.
+          const cut = pendingOutput.indexOf('\n', pendingOutput.length - PENDING_OUTPUT_MAX_CHARS);
+          pendingOutput = cut === -1 ? '' : pendingOutput.slice(cut + 1);
+        }
       }
-      return;
+      return; // `rows`/`columns` aren't known yet; `open()` draws everything once they are
     }
-    writeEmitter.fire(`\x1b[${rows - 1};1H\x1b[2K${text}`);
-    redrawInputLine();
+    const body = text ? `\x1b[${Math.max(1, rows - 1)};1H\x1b[2K${text}` : '';
+    writeEmitter.fire(`${scrollRegionSequence()}${body}${inputLineSequence()}`);
+  };
+
+  const redrawInputLine = (): void => render();
+
+  /** Writes one traffic line or banner into the scroll region above the pinned input row. */
+  const printAboveInput = (text: string): void => render(text);
+
+  /** Trailing redraw after a burst of resize activity settles. VS Code delivers `setDimensions`
+   * while the user is still dragging, and xterm.js reflows its buffer asynchronously around those
+   * calls, so a redraw issued mid-drag can be rendered against geometry that's already stale by
+   * the time it lands. Coalescing one final redraw once the geometry stops changing repaints the
+   * input row (and re-asserts the scroll region) against the settled dimensions, which is what
+   * clears up the leftover/duplicated rows seen while resizing quickly. Only ever a repaint of
+   * state we already hold — dropping it would cost correctness of the display, never data. */
+  const scheduleResizeSettle = (): void => {
+    if (resizeSettleTimer) {
+      clearTimeout(resizeSettleTimer);
+    }
+    resizeSettleTimer = setTimeout(() => {
+      resizeSettleTimer = undefined;
+      render();
+    }, RESIZE_SETTLE_MS);
   };
 
   function promptFor(): string {
@@ -288,7 +331,6 @@ export function createSerialTerminal(
         columns = initialDimensions.columns;
       }
       opened = true;
-      setScrollRegion();
       if (pendingOutput.length === 0) {
         // Genuinely nothing happened before this terminal was first revealed, so state the current
         // state. If anything *did* happen, `pendingOutput` already opens with the matching banner
@@ -298,11 +340,15 @@ export function createSerialTerminal(
           ? `Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`
           : `Port ${path} is closed. Open it in the Sessions panel to send/receive.\r\n`;
       }
-      // One positioning escape covers the whole replay: each buffered line ends in `\r\n`, and an
-      // LF at the region's bottom margin scrolls it and returns the cursor to the same row.
-      writeEmitter.fire(`\x1b[${rows - 1};1H\x1b[2K${pendingOutput}`);
+      // One `render` covers the whole replay: each buffered line ends in `\r\n`, and an LF at the
+      // region's bottom margin scrolls it and returns the cursor to the same row.
+      const replay = pendingOutput;
       pendingOutput = '';
-      redrawInputLine();
+      render(replay);
+      // VS Code resizes its xterm instance to fit the panel right after this callback, which wipes
+      // the scroll region we just set. `render` re-asserts it on every write, so live traffic
+      // recovers on its own; this settles the geometry for the case where nothing is written next.
+      scheduleResizeSettle();
     },
     close: () => {
       writeEmitter.fire('\x1b[r');
@@ -311,23 +357,27 @@ export function createSerialTerminal(
       }
     },
     setDimensions: (dimensions) => {
-      if (dimensions.rows === rows && dimensions.columns === columns) {
-        return; // nothing changed that affects the pinned row
-      }
-      if (!opened) {
-        // Can arrive before `open()`; just record it, so the replay there uses the real geometry
-        // rather than the DEFAULT_ROWS/COLUMNS placeholders.
-        rows = dimensions.rows;
-        columns = dimensions.columns;
-        return;
-      }
-      if (dimensions.rows !== rows) {
-        writeEmitter.fire(`\x1b[${rows};1H\x1b[2K`); // clear old input row before it moves
-        rows = dimensions.rows;
-        setScrollRegion();
-      }
+      // Always record the new geometry first: `inputLineSequence` clips against `columns`, and
+      // writing with stale values is what leaves wrapped remnants behind mid-drag.
+      rows = dimensions.rows;
       columns = dimensions.columns;
-      redrawInputLine();
+      if (!opened) {
+        return; // can arrive before `open()`, which will draw with the geometry recorded here
+      }
+      // Deliberately does NOT erase the *old* absolute input row before redrawing. xterm.js
+      // reflows its buffer as part of the resize, and we're only notified afterwards — so by then
+      // the old row index points at whatever content shifted into it (growing the terminal pulls
+      // scrollback lines back down), and erasing it destroyed a real output line while leaving the
+      // stale prompt untouched somewhere else. That's the duplicated/garbled output seen while
+      // dragging a terminal's edge quickly. Redrawing without erasing can leave a stale prompt
+      // line behind in the scrollback, which is cosmetic; erasing the wrong row loses data.
+      //
+      // Nor does it repaint immediately: mid-drag, VS Code delivers a stream of these while
+      // xterm.js is still reflowing, and every write issued into that is one more chance to land
+      // against geometry that's about to change again. One coalesced repaint after the drag
+      // settles is both quieter and more accurate — and traffic arriving in the meantime still
+      // renders normally, since `render` re-asserts the scroll region itself.
+      scheduleResizeSettle();
     },
     handleInput: (data: string) => {
       if (!connected || !connection) {
@@ -490,6 +540,10 @@ export function createSerialTerminal(
     onDidUserClose: userCloseEmitter.event,
     dispose: () => {
       disposing = true;
+      if (resizeSettleTimer) {
+        clearTimeout(resizeSettleTimer);
+        resizeSettleTimer = undefined;
+      }
       trafficSub?.dispose();
       updateSub?.dispose();
       connectionCloseSub?.dispose();
