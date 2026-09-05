@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SerialPort } from 'serialport';
-import { concatBytes, formatBytes, formatTrafficHeader, splitTrailingIncompleteUtf8 } from './format';
+import { concatBytes, formatBytes, formatTrafficHeader } from './format';
 
 export type Parity = 'none' | 'even' | 'odd' | 'mark' | 'space';
 
@@ -45,8 +45,9 @@ export interface FormatSettings {
   compactTimestamps: boolean;
   /** How long (ms) of quiet on the wire delimits one "message" from the next — incoming bytes are
    * buffered and coalesced into a single `TrafficEvent` until this much time passes with nothing
-   * new arriving. Also the window during which a multi-byte UTF-8 character split across two
-   * `serialport` `'data'` reads is held back rather than decoded prematurely. See `handleIncoming`. */
+   * new arriving. This is also what keeps a multi-byte UTF-8 character (or an ANSI color escape)
+   * split across two `serialport` `'data'` reads whole, since both halves land in the same buffer
+   * long before the gap elapses. See `handleIncoming`. */
   messageGapMs: number;
 }
 
@@ -117,10 +118,8 @@ export class PortConnection {
    * prior open's. */
   private historyText = '';
 
-  /** Raw bytes accumulated since the last RX flush — see `handleIncoming`/`flushRxBuffer`. Also
-   * reused to hold a trailing incomplete-looking UTF-8 sequence awaiting either a genuine
-   * continuation byte (new data arrives) or its own self-expiry flush (`rxFlushTimer` fires with
-   * nothing new having arrived) — see `flushRxBuffer`. */
+  /** Raw bytes accumulated since the last RX flush — see `handleIncoming`/`flushRxBuffer`. Always
+   * emptied in full by a flush; nothing is ever carried over into a later event. */
   private rxBuffer: Uint8Array = new Uint8Array(0);
   private rxFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -350,7 +349,7 @@ export class PortConnection {
       clearTimeout(this.rxFlushTimer);
       this.rxFlushTimer = undefined;
     }
-    this.flushRxBuffer(true);
+    this.flushRxBuffer();
     this.flushLogFile();
     if (this.logFlushTimer) {
       clearTimeout(this.logFlushTimer);
@@ -367,18 +366,16 @@ export class PortConnection {
 
   /** Coalesces raw `serialport` `'data'` chunks over `formatSettings.messageGapMs` of quiet before
    * turning them into a `TrafficEvent` — this is what lets a single logical "message" that arrives
-   * as several OS-level reads (and, more importantly, a multi-byte UTF-8 character split across
-   * two reads — see `splitTrailingIncompleteUtf8`) render as one coherent line instead of several
-   * garbled fragments. Byte counters and `onDidUpdate` still fire immediately on raw arrival (each
-   * new chunk resets the debounce timer), so the stats display stays live even while a message is
-   * still being assembled.
+   * as several OS-level reads (and, more importantly, a multi-byte UTF-8 character or an ANSI color
+   * escape split across two reads) render as one coherent line instead of several garbled
+   * fragments. Byte counters and `onDidUpdate` still fire immediately on raw arrival (each new
+   * chunk resets the debounce timer), so the stats display stays live even while a message is still
+   * being assembled.
    *
-   * A trailing incomplete-looking UTF-8 sequence left behind by a flush gets exactly one more
-   * `messageGapMs` window to receive its continuation byte — either genuinely (new data arrives
-   * here, cancelling and rescheduling `rxFlushTimer` below) or via its own self-expiry forced
-   * flush scheduled by `flushRxBuffer` itself. Either way, `rxBuffer` is guaranteed empty again
-   * well before any later, unrelated message's traffic can arrive, so concatenating fresh bytes
-   * onto it here is always safe. */
+   * This debounce is the *only* reassembly mechanism, deliberately: bytes belonging to one message
+   * arrive back-to-back on the wire (at any realistic baud rate a whole multi-byte character takes
+   * well under a millisecond), so by the time `messageGapMs` of total silence has elapsed, whatever
+   * is in `rxBuffer` is complete by definition — see `flushRxBuffer`. */
   private handleIncoming(chunk: Buffer): void {
     const bytes = new Uint8Array(chunk);
     this.stats.bytesReceived += bytes.length;
@@ -393,43 +390,29 @@ export class PortConnection {
     }, this.formatSettings.messageGapMs);
   }
 
-  /** Turns the accumulated `rxBuffer` into one `TrafficEvent`. Normally holds back a trailing
-   * incomplete UTF-8 sequence (see `splitTrailingIncompleteUtf8`) until it's complete; `force`
-   * (used on dispose/port-close, and by this method's own self-expiry timer below) flushes
-   * everything immediately instead, so buffered trailing bytes are never silently dropped when
-   * the connection is going away, and a genuinely-incomplete-forever sequence doesn't sit in
-   * `rxBuffer` indefinitely. The UTF-8 holdback is skipped entirely in hex-receive mode — hex has
-   * no multi-byte-character concept (see `format.ts`), so applying it there only ever
-   * misidentifies an ordinary trailing byte as an incomplete lead byte and holds it back into the
-   * next flush, which is what previously made a hex receive look like it shed a byte onto the
-   * following message (e.g. "00 11" then "20 00 11" instead of "00 11 20" in one piece). */
-  private flushRxBuffer(force = false): void {
+  /** Turns the whole accumulated `rxBuffer` into exactly one `TrafficEvent` and empties it.
+   *
+   * Nothing is ever held back for a later flush. Earlier versions split off a trailing
+   * incomplete-looking UTF-8 sequence (and, in the terminal, a trailing incomplete ANSI escape) to
+   * wait for a continuation byte, but that hold-back is unsound by construction at the point it was
+   * applied: a flush only ever runs after `messageGapMs` has *already* passed with nothing new
+   * arriving, so a continuation byte that was genuinely still in flight would have landed long
+   * before — and one that hasn't landed by then is never coming. All the hold-back could do was
+   * defer a byte that is genuinely invalid, either into a later, unrelated message (corrupting its
+   * leading bytes) or into a bizarrely-timed orphan line of its own. A device echoing a payload
+   * whose last byte happens to be 0xC0-0xFF — a UTF-8 lead byte with no continuation — hits this on
+   * every single send, which is exactly how it was reported. Flushing everything means such a byte
+   * renders as U+FFFD ('�') inline, on the same line as the rest of its own message, which is both
+   * correct and what any standard terminal does with invalid UTF-8. */
+  private flushRxBuffer(): void {
     if (this.rxBuffer.length === 0) {
       return;
     }
-    const { complete, pending } =
-      force || this.hexRecv
-        ? { complete: this.rxBuffer, pending: new Uint8Array(0) }
-        : splitTrailingIncompleteUtf8(this.rxBuffer);
-    this.rxBuffer = pending;
-    if (pending.length > 0) {
-      /* Give the pending tail one more messageGapMs to complete; if `handleIncoming` doesn't
-       * cancel this first (genuine continuation arrived), it wasn't actually incomplete — it's a
-       * lone invalid trailing byte with nothing more coming — so flush it out on its own instead
-       * of leaving it to be silently glued onto whatever unrelated message's traffic arrives next
-       * (previously observed as an orphaned replacement-character RX line appearing whenever the
-       * *next* send happened to occur, arbitrarily later). */
-      this.rxFlushTimer = setTimeout(() => {
-        this.rxFlushTimer = undefined;
-        this.flushRxBuffer(true);
-      }, this.formatSettings.messageGapMs);
-    }
-    if (complete.length === 0) {
-      return;
-    }
+    const bytes = this.rxBuffer;
+    this.rxBuffer = new Uint8Array(0);
     const timestamp = toLocalIsoString(new Date());
     const hex = this.hexRecv;
-    const event: TrafficEvent = { direction: 'RX', bytes: complete, timestamp, hex };
+    const event: TrafficEvent = { direction: 'RX', bytes, timestamp, hex };
     this.appendLog(event);
     this.appendHistory(event);
     this.onDidTrafficEmitter.fire(event);

@@ -3,13 +3,11 @@ import { FormatSettings, PortConnection, TrafficEvent } from './connectionManage
 import {
   appendHexInputChar,
   asciiStringToBytes,
-  concatBytes,
   formatBytes,
   formatBytesForTerminal,
   formatTrafficHeader,
   hexStringToBytes,
   isHexDigitChar,
-  splitTrailingEscape,
 } from './format';
 
 const ENTER = '\r';
@@ -23,6 +21,10 @@ const DEFAULT_COLUMNS = 80;
 /** Cap on recalled input lines (Up/Down history) — a generous bound for interactive serial
  * debugging without letting the array grow unbounded over a long session. */
 const HISTORY_LIMIT = 100;
+/** Cap on output buffered while the pty is not yet open (see `pendingOutput`). Generous enough to
+ * hold a long pre-reveal session, bounded so a terminal that is never revealed can't grow forever;
+ * trimming always drops whole lines off the front, never splitting an escape sequence. */
+const PENDING_OUTPUT_MAX_CHARS = 64 * 1024;
 /** DECSCUSR cursor-shape escapes (`CSI Ps SP q`, supported by VS Code's xterm.js-based terminal
  * renderer): a thin steady bar for insert mode (matches the vim/readline convention that a bar
  * cursor means "typing inserts"), a steady block for overwrite mode (typing replaces the character
@@ -82,6 +84,13 @@ export interface TerminalColors {
  * scrolls independently), while the last row sits outside the region and is only ever redrawn in
  * place, never scrolled — that's what keeps it pinned even when there isn't much content yet.
  *
+ * All of that positioning depends on knowing the terminal's real geometry, which VS Code only
+ * supplies when it calls `pty.open()` — and it only does that when the terminal is first actually
+ * rendered, which for a session added but never revealed may be long after its port opened and
+ * started carrying traffic. Anything fired into the write emitter before then is silently dropped
+ * by VS Code. So output produced while `opened` is false is buffered into `pendingOutput` and
+ * replayed, in order, from `open()`; see that field's comment.
+ *
  * Ctrl+L clears the screen, matching the same convention used by bash/zsh's readline
  * clear-screen binding, tmux, and other terminal-based tools, so it works the way anyone coming
  * from a terminal would expect without needing a separate extension command.
@@ -130,12 +139,16 @@ export function createSerialTerminal(
    * multiple `handleInput` calls, since VS Code's pty doesn't guarantee a multi-byte sequence
    * arrives in a single call. Reset to '' once a sequence resolves (recognized or discarded). */
   let escapeBuffer = '';
-  /** Bytes held back from the previous RX event because they looked like an incomplete ANSI CSI
-   * (color) sequence at the very end of the chunk — prepended to the next RX event before
-   * formatting, so a sequence split across two `serialport` `'data'` reads still renders as one
-   * color escape instead of garbling as two half-sequences. Ascii mode only; hex mode and TX never
-   * carry anything over. Reset on every (re)attach since a new connection starts a new byte stream. */
-  let pendingRx: Uint8Array = new Uint8Array(0);
+  /** Traffic/banner text produced before VS Code has called `pty.open()`, replayed in order once it
+   * does. VS Code only subscribes to `onDidWrite` at open time, and only calls `open()` when the
+   * terminal is first actually rendered — so anything fired into `writeEmitter` before then is
+   * silently discarded. A session whose port is opened (and starts sending/receiving) while its
+   * terminal has never been revealed would therefore lose that traffic from the terminal entirely,
+   * even though the file log — reading the very same `TrafficEvent`s — recorded all of it. That
+   * mismatch is what "the log file is correct, but the terminal is not" was. Only the raw text is
+   * buffered, never the cursor-positioning escapes around it: `rows` isn't known until `open()`
+   * either, so the positioning has to be computed at replay time, not at print time. */
+  let pendingOutput = '';
 
   let connection: PortConnection | undefined;
   let connected = false;
@@ -163,6 +176,9 @@ export function createSerialTerminal(
    * the cursor in either direction naturally scrolls the window to follow it. Also positions the
    * real terminal cursor at its on-screen column and sets its DECSCUSR shape per `insertMode`. */
   const redrawInputLine = (): void => {
+    if (!opened) {
+      return; // `rows`/`columns` aren't known yet; `open()` draws the input line once it is
+    }
     const prompt = promptFor();
     const displayLine = connected ? line : '';
     const displayCursorPos = connected ? cursorPos : 0;
@@ -179,8 +195,21 @@ export function createSerialTerminal(
    * `setDimensions` already apply to their own rows) so a shorter new line can never leave a
    * longer previous line's trailing characters dangling on screen — e.g. a stale hex-formatted
    * tail surviving past a shorter ASCII-decoded line, previously observed when this row's content
-   * didn't get fully overwritten by the next write. */
+   * didn't get fully overwritten by the next write.
+   *
+   * Before the pty is open, the text is buffered instead (see `pendingOutput`) rather than fired
+   * into a `writeEmitter` nobody is listening to yet. */
   const printAboveInput = (text: string): void => {
+    if (!opened) {
+      pendingOutput += text;
+      if (pendingOutput.length > PENDING_OUTPUT_MAX_CHARS) {
+        // Drop whole lines off the front, never a partial one — slicing mid-escape-sequence would
+        // replay a truncated escape and corrupt the display.
+        const cut = pendingOutput.indexOf('\n', pendingOutput.length - PENDING_OUTPUT_MAX_CHARS);
+        pendingOutput = cut === -1 ? '' : pendingOutput.slice(cut + 1);
+      }
+      return;
+    }
     writeEmitter.fire(`\x1b[${rows - 1};1H\x1b[2K${text}`);
     redrawInputLine();
   };
@@ -195,20 +224,11 @@ export function createSerialTerminal(
   function subscribeToConnection(conn: PortConnection): void {
     trafficSub = conn.onDidTraffic((event) => {
       try {
-        if (event.direction === 'RX' && !event.hex) {
-          const merged = pendingRx.length > 0 ? concatBytes(pendingRx, event.bytes) : event.bytes;
-          const { complete, pending } = splitTrailingEscape(merged);
-          pendingRx = pending;
-          printAboveInput(formatTrafficLine(conn, event, colors, formatSettings, complete));
-          return;
-        }
-        pendingRx = new Uint8Array(0);
         printAboveInput(formatTrafficLine(conn, event, colors, formatSettings));
       } catch {
         // Defensive backstop: a malformed/unexpected event should never leave the terminal in a
         // corrupted or stuck state (e.g. a partially-written scroll-region escape) — degrade to a
         // plain hex dump instead of breaking the whole session's display.
-        pendingRx = new Uint8Array(0);
         printAboveInput(`${DIM}[render error]${RESET} ${formatBytes(event.bytes, true)}\r\n`);
       }
     });
@@ -216,10 +236,24 @@ export function createSerialTerminal(
     connectionCloseSub = conn.onDidClose(() => detach());
   }
 
+  /** Drops the current connection's event subscriptions without printing anything or touching
+   * input state — shared by `detach` (which adds the banner/state reset) and `attach` (which uses
+   * it to release a previous connection before binding a new one, rather than overwriting the
+   * subscription fields and leaking the old ones). */
+  const unsubscribe = (): void => {
+    trafficSub?.dispose();
+    updateSub?.dispose();
+    connectionCloseSub?.dispose();
+    trafficSub = undefined;
+    updateSub = undefined;
+    connectionCloseSub = undefined;
+  };
+
   const attach = (conn: PortConnection): void => {
     if (connected && connection === conn) {
       return;
     }
+    unsubscribe(); // releases a prior connection's subscriptions if we're rebinding
     connection = conn;
     connected = true;
     line = '';
@@ -227,11 +261,8 @@ export function createSerialTerminal(
     historyIndex = -1;
     escapeBuffer = '';
     insertMode = true;
-    pendingRx = new Uint8Array(0);
     subscribeToConnection(conn);
-    if (opened) {
-      printAboveInput(`Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`);
-    }
+    printAboveInput(`Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`);
   };
 
   const detach = (): void => {
@@ -239,21 +270,13 @@ export function createSerialTerminal(
       return;
     }
     connected = false;
-    trafficSub?.dispose();
-    updateSub?.dispose();
-    connectionCloseSub?.dispose();
-    trafficSub = undefined;
-    updateSub = undefined;
-    connectionCloseSub = undefined;
+    unsubscribe();
     connection = undefined;
     line = '';
     cursorPos = 0;
     historyIndex = -1;
     escapeBuffer = '';
-    pendingRx = new Uint8Array(0);
-    if (opened) {
-      printAboveInput('Port disconnected. Reopen to resume.\r\n');
-    }
+    printAboveInput('Port disconnected. Reopen to resume.\r\n');
   };
 
   const pty: vscode.Pseudoterminal = {
@@ -266,11 +289,20 @@ export function createSerialTerminal(
       }
       opened = true;
       setScrollRegion();
-      printAboveInput(
-        connected
+      if (pendingOutput.length === 0) {
+        // Genuinely nothing happened before this terminal was first revealed, so state the current
+        // state. If anything *did* happen, `pendingOutput` already opens with the matching banner
+        // (attach's "Connected" or detach's "disconnected") from when it actually happened —
+        // printing a state banner here too would contradict it.
+        pendingOutput = connected
           ? `Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`
-          : `Port ${path} is closed. Open it in the Sessions panel to send/receive.\r\n`,
-      );
+          : `Port ${path} is closed. Open it in the Sessions panel to send/receive.\r\n`;
+      }
+      // One positioning escape covers the whole replay: each buffered line ends in `\r\n`, and an
+      // LF at the region's bottom margin scrolls it and returns the cursor to the same row.
+      writeEmitter.fire(`\x1b[${rows - 1};1H\x1b[2K${pendingOutput}`);
+      pendingOutput = '';
+      redrawInputLine();
     },
     close: () => {
       writeEmitter.fire('\x1b[r');
@@ -281,6 +313,13 @@ export function createSerialTerminal(
     setDimensions: (dimensions) => {
       if (dimensions.rows === rows && dimensions.columns === columns) {
         return; // nothing changed that affects the pinned row
+      }
+      if (!opened) {
+        // Can arrive before `open()`; just record it, so the replay there uses the real geometry
+        // rather than the DEFAULT_ROWS/COLUMNS placeholders.
+        rows = dimensions.rows;
+        columns = dimensions.columns;
+        return;
       }
       if (dimensions.rows !== rows) {
         writeEmitter.fire(`\x1b[${rows};1H\x1b[2K`); // clear old input row before it moves
@@ -467,20 +506,19 @@ export function createSerialTerminal(
  * timestamp and mode (the same values written to the file log, never recomputed — see
  * `formatTrafficHeader`), rendered compact per the live `formatSettings.compactTimestamps` (read at
  * format time, so a later setting change never retroactively alters an already-printed line).
- * `bytesOverride`, when given, replaces `event.bytes` — used for RX-ascii-mode events whose bytes
- * were merged/split against a carried-over ANSI escape fragment (see `pendingRx` above). */
+ * Renders exactly the bytes the event carries — nothing is ever held back from one event to be
+ * prepended onto a later one, so this line and the file log's line for the same event always agree. */
 function formatTrafficLine(
   connection: PortConnection,
   event: TrafficEvent,
   colors: TerminalColors,
   formatSettings: FormatSettings,
-  bytesOverride?: Uint8Array,
 ): string {
   const color = ansiTruecolor(event.direction === 'TX' ? colors.tx : colors.rx);
   const prefix = connection.showTimestamp
     ? `${DIM}${formatTrafficHeader(event.timestamp, event.direction, event.hex, formatSettings.compactTimestamps)}${RESET} `
     : '';
-  return `${prefix}${color}${formatBytesForTerminal(bytesOverride ?? event.bytes, event.hex)}${RESET}\r\n`;
+  return `${prefix}${color}${formatBytesForTerminal(event.bytes, event.hex)}${RESET}\r\n`;
 }
 
 /** Converts a "#rrggbb" hex color into a 24-bit ANSI SGR foreground-color escape sequence.
