@@ -1,6 +1,9 @@
 import * as vscode from 'vscode';
 import { SerialPort } from 'serialport';
 import { concatBytes, formatBytes, formatTrafficHeader, splitTrailingIncompleteUtf8 } from './format';
+import { LogFormat, ReadableLog } from './readableLog';
+
+export type { LogFormat } from './readableLog';
 
 export type Parity = 'none' | 'even' | 'odd' | 'mark' | 'space';
 
@@ -87,6 +90,7 @@ export class PortConnection {
   hexSend = false;
   hexRecv = false;
   recording = false;
+  private logFormatInternal: LogFormat = 'traffic';
   showTimestamp = false;
   /** Both default deasserted (unchecked). RTS/DTR are electrically AC-coupled to many boards'
    * reset lines (the classic Arduino/ESP auto-reset circuit), so what resets the board is the
@@ -101,10 +105,18 @@ export class PortConnection {
   private readonly port: SerialPort;
   private logFileUriInternal: vscode.Uri | undefined;
   private logFolderUri: vscode.Uri | undefined;
-  private logBuffer = '';
+  private logBufferState = { text: '' };
+  private get logBuffer(): string {
+    return this.logBufferState.text;
+  }
+  private set logBuffer(value: string) {
+    this.logBufferState.text = value;
+  }
   private logFlushTimer: ReturnType<typeof setTimeout> | undefined;
   private logFlushChain: Promise<void> = Promise.resolve();
   private logDirReady: Promise<void> = Promise.resolve();
+  private readableLog: ReadableLog | undefined;
+  private logFileNumber = 0;
   private controlLineChain: Promise<void> = Promise.resolve();
   /** Plain-text buffer of every already-formatted line this connection instance has produced so
    * far, capped to `HISTORY_MAX_CHARS`. Populated unconditionally (not just while recording) so
@@ -150,7 +162,10 @@ export class PortConnection {
     });
 
     this.port.on('data', (chunk: Buffer) => this.handleIncoming(chunk));
-    this.port.on('close', () => this.onDidCloseEmitter.fire());
+    this.port.on('close', () => {
+      this.finishRecording();
+      this.onDidCloseEmitter.fire();
+    });
     this.port.on('error', (err) => {
       vscode.window.showErrorMessage(`Serial port ${path}: ${err.message}`);
     });
@@ -165,6 +180,7 @@ export class PortConnection {
   close(): Promise<void> {
     return new Promise((resolve, reject) => {
       if (!this.port.isOpen) {
+        this.finishRecording();
         resolve();
         return;
       }
@@ -212,11 +228,17 @@ export class PortConnection {
   }
 
   setHexSend(value: boolean): void {
+    if (value !== this.hexSend) {
+      this.readableLog?.flush('TX');
+    }
     this.hexSend = value;
     this.onDidUpdateEmitter.fire();
   }
 
   setHexRecv(value: boolean): void {
+    if (value !== this.hexRecv) {
+      this.readableLog?.flush('RX');
+    }
     this.hexRecv = value;
     this.onDidUpdateEmitter.fire();
   }
@@ -232,7 +254,9 @@ export class PortConnection {
    * would if "Show timestamp" was on when that line originally appeared (see `appendHistory`), and
    * is bare content otherwise. Since `historyText` is scoped to
    * this connection instance, a reopened connection's empty buffer means turning RF on after a
-   * reopen only ever backfills that reopen's own traffic.
+   * reopen only ever backfills that reopen's own traffic. Readable recordings start with new
+   * traffic instead: the formatted traffic history may contain ANSI controls and cannot be
+   * reconstructed into device lines. A reused file must have the same recording format.
    *
    * `reuseFileUri` only reuses the *filename* — this is a fresh `PortConnection` instance (a
    * reopen), so its own `logBuffer`/`historyText` know nothing about whatever that file already
@@ -243,11 +267,22 @@ export class PortConnection {
    * already awaits, and (see there) now also defers capturing `logBuffer` until after that await
    * resolves — so a flush can never race ahead of this and write a truncated file.
    */
-  setRecording(value: boolean, logFolderUri?: vscode.Uri, reuseFileUri?: vscode.Uri): void {
+  setRecording(
+    value: boolean,
+    logFolderUri?: vscode.Uri,
+    reuseFileUri?: vscode.Uri,
+    format: LogFormat = 'traffic',
+  ): void {
+    this.finishRecording();
     this.recording = value;
     if (value && logFolderUri) {
+      this.logFormatInternal = format;
       this.logFolderUri = logFolderUri;
-      this.logBuffer = '';
+      const bufferState = (this.logBufferState = { text: '' });
+      this.readableLog =
+        format === 'readable'
+          ? new ReadableLog((line) => this.appendLogLine(line), this.formatSettings)
+          : undefined;
       const ensureFolder = async (): Promise<void> => {
         try {
           await vscode.workspace.fs.createDirectory(logFolderUri);
@@ -261,7 +296,7 @@ export class PortConnection {
           await ensureFolder();
           try {
             const existing = await vscode.workspace.fs.readFile(reuseFileUri);
-            this.logBuffer = Buffer.from(existing).toString('utf8') + this.logBuffer;
+            bufferState.text = Buffer.from(existing).toString('utf8') + bufferState.text;
           } catch {
             // Nothing on disk yet (RF was checked but no traffic was ever flushed before the port
             // closed) — nothing to preserve, continue with an empty buffer.
@@ -269,8 +304,8 @@ export class PortConnection {
         })();
       } else {
         this.logDirReady = ensureFolder();
-        this.logFileUriInternal = vscode.Uri.joinPath(logFolderUri, buildLogFileName(this.path));
-        if (this.historyText) {
+        this.logFileUriInternal = this.nextLogFileUri(logFolderUri);
+        if (format === 'traffic' && this.historyText) {
           this.logBuffer += this.historyText;
         }
         // Force an immediate (non-debounced) flush so the file is physically created the moment
@@ -278,8 +313,6 @@ export class PortConnection {
         // `flushLogFile`'s empty-buffer guard is bypassed via `force` for exactly this case.
         this.scheduleLogFlush(true);
       }
-    } else if (!value) {
-      this.flushLogFile();
     }
     this.onDidUpdateEmitter.fire();
   }
@@ -335,6 +368,10 @@ export class PortConnection {
     return this.logFileUriInternal?.fsPath;
   }
 
+  get logFormat(): LogFormat {
+    return this.logFormatInternal;
+  }
+
   /** The log file's full URI (scheme + authority preserved), for callers that need a lossless
    * round-trip — e.g. reopening it via `vscode.window.showTextDocument` on a remote (WSL/SSH)
    * workspace, where the lossy `.fsPath` string above would silently discard the remote scheme. */
@@ -343,15 +380,7 @@ export class PortConnection {
   }
 
   dispose(): void {
-    if (this.rxFlushTimer) {
-      clearTimeout(this.rxFlushTimer);
-      this.rxFlushTimer = undefined;
-    }
-    this.flushRxBuffer(true);
-    this.flushLogFile();
-    if (this.logFlushTimer) {
-      clearTimeout(this.logFlushTimer);
-    }
+    this.finishRecording();
     if (this.port.isOpen) {
       this.port.close(() => {
         /* best-effort native handle release on teardown */
@@ -417,6 +446,14 @@ export class PortConnection {
     if (!this.recording) {
       return;
     }
+    if (this.readableLog) {
+      if (!event.hex) {
+        this.readableLog.write(event.direction, event.bytes, event.timestamp);
+        return;
+      }
+      // Templates carry their own mode, independent of the live send toggle.
+      this.readableLog.flush(event.direction);
+    }
     this.writeLogLine(event.direction, event.bytes, event.timestamp, event.hex);
   }
 
@@ -426,8 +463,12 @@ export class PortConnection {
   private writeLogLine(direction: 'TX' | 'RX', bytes: Uint8Array, timestamp: string, hex: boolean): void {
     const formatted = formatBytes(bytes, hex);
     const line = `${formatTrafficHeader(timestamp, direction, hex, this.formatSettings.compactTimestamps)} ${formatted}`;
+    this.appendLogLine(line + '\n');
+  }
+
+  private appendLogLine(line: string): void {
     if (this.logFileUriInternal) {
-      this.logBuffer += line + '\n';
+      this.logBuffer += line;
       this.scheduleLogFlush();
     }
   }
@@ -454,6 +495,25 @@ export class PortConnection {
       }
       this.historyText = this.historyText.slice(newlineIndex + 1);
     }
+  }
+
+  private finishRecording(): void {
+    if (this.rxFlushTimer) {
+      clearTimeout(this.rxFlushTimer);
+      this.rxFlushTimer = undefined;
+    }
+    this.flushRxBuffer(true);
+    this.readableLog?.flush();
+    this.readableLog = undefined;
+    if (this.logFlushTimer) {
+      clearTimeout(this.logFlushTimer);
+      this.logFlushTimer = undefined;
+    }
+    this.flushLogFile();
+  }
+
+  private nextLogFileUri(folder: vscode.Uri): vscode.Uri {
+    return vscode.Uri.joinPath(folder, buildLogFileName(this.path, this.logFileNumber++));
   }
 
   /** Debounces a log write; `force` (used to eagerly create the log file the instant RF is
@@ -484,18 +544,23 @@ export class PortConnection {
       return;
     }
     const uri = this.logFileUriInternal;
+    const dirReady = this.logDirReady;
+    const bufferState = this.logBufferState;
     this.logFlushChain = this.logFlushChain
-      .then(() => this.logDirReady)
+      .then(() => dirReady)
       .then(() => {
-        // `this.logBuffer` is read only now, after `logDirReady` resolves, rather than captured
-        // synchronously above — `logDirReady` may still be prepending a reused file's on-disk
-        // content onto it (see `setRecording`), and reading it any earlier could win that race and
-        // write a truncated file.
-        const content = Buffer.from(this.logBuffer, 'utf8');
-        if (content.byteLength >= LOG_ROTATE_BYTES && this.logFolderUri) {
+        // Wait for reused content, but retain this recording's buffer even if a new recording
+        // has started before the queued write runs.
+        const content = Buffer.from(bufferState.text, 'utf8');
+        if (
+          content.byteLength >= LOG_ROTATE_BYTES &&
+          this.logFolderUri &&
+          this.logBufferState === bufferState &&
+          this.logFileUriInternal === uri
+        ) {
           // Start a fresh segment so future flushes don't need to resend everything written so far.
-          this.logFileUriInternal = vscode.Uri.joinPath(this.logFolderUri, buildLogFileName(this.path));
-          this.logBuffer = '';
+          this.logFileUriInternal = this.nextLogFileUri(this.logFolderUri);
+          this.logBufferState = { text: '' };
         }
         return vscode.workspace.fs.writeFile(uri, content);
       })
@@ -580,8 +645,8 @@ export class ConnectionManager {
   }
 }
 
-function buildLogFileName(portPath: string): string {
+function buildLogFileName(portPath: string, sequence = 0): string {
   const sanitizedPath = portPath.replace(/[\\/:*?"<>|]/g, '_');
   const timestamp = toLocalIsoString(new Date()).replace(/[:.]/g, '-');
-  return `${sanitizedPath}_${timestamp}.log`;
+  return `${sanitizedPath}_${timestamp}${sequence ? `_${sequence}` : ''}.log`;
 }

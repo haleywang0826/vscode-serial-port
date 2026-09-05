@@ -134,6 +134,19 @@
           "default": "${workspaceFolder}/serial_logs",
           "description": "Folder to write serial session log files to. The literal ${workspaceFolder} token is resolved to the first workspace folder at log-write time (falling back to the extension's global storage folder when no workspace is open); any other value is used as-is as an absolute path."
         },
+        "serialPort.logFormat": {
+          "type": "string",
+          "enum": [
+            "traffic",
+            "readable"
+          ],
+          "default": "traffic",
+          "enumDescriptions": [
+            "Traffic records using the captured hex/text mode and shared timestamp header; RX message grouping follows messageGapMs.",
+            "UTF-8 device lines with ANSI removed and ESP-IDF severity markers for editor highlighting. Hex mode is unchanged."
+          ],
+          "description": "Format for newly started recordings. Stop and restart recording to apply changes."
+        },
         "serialPort.txColor": {
           "type": "string",
           "default": "#00cccc",

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { SerialPort } from 'serialport';
-import { ConnectionManager, DEFAULT_PORT_CONFIG, FormatSettings, PortConfig } from '../serial/connectionManager';
+import { ConnectionManager, DEFAULT_PORT_CONFIG, FormatSettings, LogFormat, PortConfig } from '../serial/connectionManager';
 import { asciiStringToBytes, hexStringToBytes, normalizeHexString } from '../serial/format';
 import { createSerialTerminal, SerialTerminal, TerminalColors } from '../serial/pseudoterminal';
 import { SendFormat, TemplateStore } from '../templates/templateStore';
@@ -93,6 +93,7 @@ interface StoredSessionMeta {
    * SAME file on a reopen with recording already on, and to open it losslessly on a remote
    * workspace — see `logFilePath`, which is display-only and lossy for that purpose. */
   logFileUri: string | undefined;
+  logFormat?: LogFormat;
   stats: { bytesSent: number; bytesReceived: number };
 }
 
@@ -249,6 +250,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
       recording: previous?.recording ?? false,
       logFilePath: previous?.logFilePath,
       logFileUri: previous?.logFileUri,
+      logFormat: previous?.logFormat,
       stats: previous?.stats ?? { bytesSent: 0, bytesReceived: 0 },
     };
   }
@@ -519,6 +521,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           recording: connection.recording,
           logFilePath: connection.logFilePath,
           logFileUri: connection.logFileUri?.toString(),
+          logFormat: connection.logFormat,
           stats: { ...connection.stats },
         });
         this.persistSessions();
@@ -536,6 +539,7 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           true,
           this.resolveLogFolderUri(),
           meta.logFileUri ? vscode.Uri.parse(meta.logFileUri) : undefined,
+          meta.logFormat ?? (meta.logFileUri ? 'traffic' : this.config().get('logFormat') === 'readable' ? 'readable' : 'traffic'),
         );
       }
       // Always explicitly assert RTS/DTR (rather than only when they differ from the connection's
@@ -659,7 +663,12 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
           connection.setHexRecv(value);
           break;
         case 'record':
-          connection.setRecording(value, this.resolveLogFolderUri());
+          connection.setRecording(
+            value,
+            this.resolveLogFolderUri(),
+            undefined,
+            this.config().get('logFormat') === 'readable' ? 'readable' : 'traffic',
+          );
           break;
         case 'showTimestamp':
           connection.setShowTimestamp(value);
@@ -685,6 +694,14 @@ export class SerialPanelProvider implements vscode.WebviewViewProvider, vscode.D
     }
     if (checkbox === 'record') {
       meta.recording = value;
+      if (value) {
+        const format = this.config().get('logFormat') === 'readable' ? 'readable' : 'traffic';
+        if (meta.logFileUri && format !== (meta.logFormat ?? 'traffic')) {
+          meta.logFileUri = undefined;
+          meta.logFilePath = undefined;
+        }
+        meta.logFormat = format;
+      }
     } else {
       meta[checkbox] = value;
     }

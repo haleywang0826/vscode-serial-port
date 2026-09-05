@@ -161,10 +161,11 @@ export function formatTrafficHeader(timestamp: string, direction: 'TX' | 'RX', h
  * `serialport` `'data'` event splits it across two reads: the caller holds `pending` back and
  * prepends it to the next chunk before calling `bytesToAsciiForTerminal` again, instead of feeding
  * each half to `bytesToAsciiForTerminal` independently (which would render each half as un-colored
- * garbage). Only scans the last 32 bytes, since a real SGR sequence is always short.
+ * garbage). Caps the look-behind at 4096 bytes to bound buffering of malformed input,
+ * while allowing compound SGR sequences with both RGB colors and multiple attributes.
  */
 export function splitTrailingEscape(data: Uint8Array): { complete: Uint8Array; pending: Uint8Array } {
-  const searchFrom = Math.max(0, data.length - 32);
+  const searchFrom = Math.max(0, data.length - 4096);
   for (let start = data.length - 1; start >= searchFrom; start--) {
     if (data[start] !== ESC) {
       continue;

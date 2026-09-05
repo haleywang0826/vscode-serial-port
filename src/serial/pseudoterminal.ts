@@ -3,14 +3,13 @@ import { FormatSettings, PortConnection, TrafficEvent } from './connectionManage
 import {
   appendHexInputChar,
   asciiStringToBytes,
-  concatBytes,
   formatBytes,
   formatBytesForTerminal,
   formatTrafficHeader,
   hexStringToBytes,
   isHexDigitChar,
-  splitTrailingEscape,
 } from './format';
+import { RxTerminalFormatter } from './terminalFormat';
 
 const ENTER = '\r';
 const BACKSPACE = '\x7f';
@@ -130,12 +129,8 @@ export function createSerialTerminal(
    * multiple `handleInput` calls, since VS Code's pty doesn't guarantee a multi-byte sequence
    * arrives in a single call. Reset to '' once a sequence resolves (recognized or discarded). */
   let escapeBuffer = '';
-  /** Bytes held back from the previous RX event because they looked like an incomplete ANSI CSI
-   * (color) sequence at the very end of the chunk — prepended to the next RX event before
-   * formatting, so a sequence split across two `serialport` `'data'` reads still renders as one
-   * color escape instead of garbling as two half-sequences. Ascii mode only; hex mode and TX never
-   * carry anything over. Reset on every (re)attach since a new connection starts a new byte stream. */
-  let pendingRx: Uint8Array = new Uint8Array(0);
+  let rxFormatter = new RxTerminalFormatter();
+  let hexRecv = false;
 
   let connection: PortConnection | undefined;
   let connected = false;
@@ -191,23 +186,31 @@ export function createSerialTerminal(
     trafficSub = conn.onDidTraffic((event) => {
       try {
         if (event.direction === 'RX' && !event.hex) {
-          const merged = pendingRx.length > 0 ? concatBytes(pendingRx, event.bytes) : event.bytes;
-          const { complete, pending } = splitTrailingEscape(merged);
-          pendingRx = pending;
-          printAboveInput(formatTrafficLine(conn, event, colors, formatSettings, complete));
+          const text = rxFormatter.format(event.bytes);
+          if (text) {
+            printAboveInput(formatTrafficLine(conn, event, colors, formatSettings, text));
+          }
           return;
         }
-        pendingRx = new Uint8Array(0);
+        if (event.direction === 'RX') {
+          rxFormatter = new RxTerminalFormatter();
+        }
         printAboveInput(formatTrafficLine(conn, event, colors, formatSettings));
       } catch {
         // Defensive backstop: a malformed/unexpected event should never leave the terminal in a
         // corrupted or stuck state (e.g. a partially-written scroll-region escape) — degrade to a
         // plain hex dump instead of breaking the whole session's display.
-        pendingRx = new Uint8Array(0);
+        rxFormatter = new RxTerminalFormatter();
         printAboveInput(`${DIM}[render error]${RESET} ${formatBytes(event.bytes, true)}\r\n`);
       }
     });
-    updateSub = conn.onDidUpdate(() => redrawInputLine());
+    updateSub = conn.onDidUpdate(() => {
+      if (hexRecv !== conn.hexRecv) {
+        hexRecv = conn.hexRecv;
+        rxFormatter = new RxTerminalFormatter();
+      }
+      redrawInputLine();
+    });
     connectionCloseSub = conn.onDidClose(() => detach());
   }
 
@@ -222,7 +225,8 @@ export function createSerialTerminal(
     historyIndex = -1;
     escapeBuffer = '';
     insertMode = true;
-    pendingRx = new Uint8Array(0);
+    rxFormatter = new RxTerminalFormatter();
+    hexRecv = conn.hexRecv;
     subscribeToConnection(conn);
     if (opened) {
       printAboveInput(`Connected to ${path}. Type data and press Enter to send. Ctrl+L clears the screen.\r\n`);
@@ -245,7 +249,7 @@ export function createSerialTerminal(
     cursorPos = 0;
     historyIndex = -1;
     escapeBuffer = '';
-    pendingRx = new Uint8Array(0);
+    rxFormatter = new RxTerminalFormatter();
     if (opened) {
       printAboveInput('Port disconnected. Reopen to resume.\r\n');
     }
@@ -462,20 +466,19 @@ export function createSerialTerminal(
  * timestamp and mode (the same values written to the file log, never recomputed — see
  * `formatTrafficHeader`), rendered compact per the live `formatSettings.compactTimestamps` (read at
  * format time, so a later setting change never retroactively alters an already-printed line).
- * `bytesOverride`, when given, replaces `event.bytes` — used for RX-ascii-mode events whose bytes
- * were merged/split against a carried-over ANSI escape fragment (see `pendingRx` above). */
+ * `textOverride` carries streaming RX formatting and styles. */
 function formatTrafficLine(
   connection: PortConnection,
   event: TrafficEvent,
   colors: TerminalColors,
   formatSettings: FormatSettings,
-  bytesOverride?: Uint8Array,
+  textOverride?: string,
 ): string {
   const color = ansiTruecolor(event.direction === 'TX' ? colors.tx : colors.rx);
   const prefix = connection.showTimestamp
     ? `${DIM}${formatTrafficHeader(event.timestamp, event.direction, event.hex, formatSettings.compactTimestamps)}${RESET} `
     : '';
-  return `${prefix}${color}${formatBytesForTerminal(bytesOverride ?? event.bytes, event.hex)}${RESET}\r\n`;
+  return `${prefix}${color}${textOverride ?? formatBytesForTerminal(event.bytes, event.hex)}${RESET}\r\n`;
 }
 
 /** Converts a "#rrggbb" hex color into a 24-bit ANSI SGR foreground-color escape sequence.
