@@ -423,6 +423,8 @@ export class PortConnection {
             // closed) — nothing to preserve, continue with an empty buffer.
           }
         })();
+        // Write start banner for this new session, even though we're reusing the file
+        this.writeSessionBanner('recording started');
       } else {
         this.logDirReady = ensureFolder();
         this.logFileUriInternal = vscode.Uri.joinPath(
